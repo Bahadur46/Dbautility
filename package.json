@@ -1,0 +1,33 @@
+{
+  "name": "dba-utility-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DBA Utility — REST API for Manual Index management with automatic audit logging",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "seed": "node src/scripts/seed.js",
+    "create:user": "node src/scripts/createUser.js",
+    "check:clusters": "node src/scripts/checkClusters.js",
+    "cleanup:accounts": "node src/scripts/cleanupCentralAccounts.js"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "mongoose": "^8.6.0",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^10.1.2",
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

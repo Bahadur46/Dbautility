@@ -1,0 +1,7 @@
+{
+  "watch": ["src"],
+  "ext": "js,json",
+  "ignore": ["node_modules", "src/scripts/seed.js"],
+  "delay": "400",
+  "verbose": false
+}
