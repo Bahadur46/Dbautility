@@ -7,6 +7,49 @@ const clusters = require('./config/clusters');
 const { connectAllClusters, disconnectClusters } = require('./config/clusterConnections');
 const { ensureSeedUsers } = require('./services/authService');
 
+// Binds the port, tolerating a previous instance that is still letting go of it
+// (nodemon restarts, a terminal closed without Ctrl+C). Retries a few times
+// before giving up with an actionable message instead of a raw stack trace.
+function listenWithRetry(application, port, { retries = 6, delayMs = 1000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let attempt = 0;
+
+    const tryListen = () => {
+      const server = application.listen(port, () => {
+        server.removeListener('error', onError);
+        // eslint-disable-next-line no-console
+        console.log(`[server] DBA Utility API listening on http://localhost:${port} (${config.nodeEnv})`);
+        resolve(server);
+      });
+
+      const onError = (err) => {
+        if (err.code !== 'EADDRINUSE') return reject(err);
+
+        attempt += 1;
+        if (attempt <= retries) {
+          // eslint-disable-next-line no-console
+          console.warn(`[server] Port ${port} busy, retrying (${attempt}/${retries})…`);
+          setTimeout(tryListen, delayMs);
+          return;
+        }
+
+        // eslint-disable-next-line no-console
+        console.error(
+          `\n[server] Port ${port} is still in use by another process.\n` +
+            `         Find it:  netstat -ano | findstr :${port}\n` +
+            `         Kill it:  taskkill /PID <PID> /F\n` +
+            `         Or run on a different port:  set PORT=5001 && npm run dev\n`
+        );
+        reject(new Error(`Port ${port} already in use`));
+      };
+
+      server.once('error', onError);
+    };
+
+    tryListen();
+  });
+}
+
 async function start() {
   assertEnv();
 
@@ -31,10 +74,7 @@ async function start() {
     console.log(`[auth] Seeded admin accounts: ${created.join(', ')}`);
   }
 
-  const server = app.listen(config.port, () => {
-    // eslint-disable-next-line no-console
-    console.log(`[server] DBA Utility API listening on http://localhost:${config.port} (${config.nodeEnv})`);
-  });
+  const server = await listenWithRetry(app, config.port);
 
   const shutdown = async (signal) => {
     // eslint-disable-next-line no-console

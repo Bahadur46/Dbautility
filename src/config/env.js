@@ -90,7 +90,13 @@ config.allowInMemoryFallback =
 function assertEnv() {
   const missing = required.filter((key) => !process.env[key]);
   if (missing.length && config.isProduction) {
-    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+    throw new Error(
+      `Missing required environment variables: ${missing.join(', ')}. ` +
+        'In a deployment these come from the host\'s environment, not from .env — ' +
+        '.env is gitignored and is never part of the build artifact. ' +
+        'On Azure App Service set them under Configuration > Application settings ' +
+        '(deploy/set-azure-appsettings.ps1 pushes them for you).'
+    );
   }
   if (config.isProduction && !process.env.AUTH_SECRET) {
     throw new Error('AUTH_SECRET must be set in production, or every restart logs all users out');
