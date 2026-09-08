@@ -8,9 +8,31 @@ mongoose.set('strictQuery', true);
 
 const CONNECT_TIMEOUT_MS = 10000;
 
-// 'mongodb' once connected to the configured database, 'in-memory' when the
-// fallback is in use, 'disconnected' before boot. Reported by /api/health.
-let dbMode = 'disconnected';
+// 'connecting' while the first attempt is still running, 'mongodb' once
+// connected to the configured database, 'in-memory' when the fallback is in
+// use, 'unavailable' when neither could be reached, 'disconnected' after a
+// clean shutdown. Reported by /api/health.
+let dbMode = 'connecting';
+
+// Why the database is unavailable, for /api/health and for the 503 the data
+// routes answer with. Null whenever the database is usable.
+let dbError = null;
+
+// How long the in-memory fallback gets to come up. It downloads a ~200 MB
+// mongod binary on first use, and on a fresh deployment the cache is always
+// empty — so without a bound a hosted boot can hang on that download until the
+// platform gives up on the container and serves 503 with nothing in the log.
+const FALLBACK_START_TIMEOUT_MS =
+  parseInt(process.env.INMEMORY_STARTUP_TIMEOUT_MS, 10) || 60000;
+
+/** Reject rather than wait forever, so a slow download cannot wedge the boot. */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /** Hide the password when echoing a connection string back to the operator. */
 function maskUri(uri = '') {
@@ -94,6 +116,7 @@ async function connectDB(uri = config.mongoUri) {
   try {
     const conn = await attempt(uri);
     dbMode = 'mongodb';
+    dbError = null;
     attachConnectionListeners();
     // eslint-disable-next-line no-console
     console.log(`[db] Connected to MongoDB: ${conn.connection.name}`);
@@ -105,9 +128,11 @@ async function connectDB(uri = config.mongoUri) {
       // eslint-disable-next-line no-console
       console.error(
         config.isProduction
-          ? ' Refusing to start: the in-memory fallback is disabled in production.\n'
+          ? ' Refusing to use the in-memory fallback: it is disabled in production.\n'
           : ' The in-memory fallback is disabled (ALLOW_INMEMORY_FALLBACK=false).\n'
       );
+      dbMode = 'unavailable';
+      dbError = err.message;
       throw err;
     }
 
@@ -126,18 +151,25 @@ async function connectDB(uri = config.mongoUri) {
 
     let memoryUri;
     try {
-      memoryUri = await startInMemoryMongo();
+      memoryUri = await withTimeout(
+        startInMemoryMongo(),
+        FALLBACK_START_TIMEOUT_MS,
+        'The in-memory database'
+      );
     } catch (fallbackErr) {
       /* eslint-disable no-console */
       console.error(' The in-memory fallback could not start either.');
       console.error(` Reason: ${fallbackErr.message}`);
       console.error(' Fix the database connection above, or run "npm install".\n');
       /* eslint-enable no-console */
+      dbMode = 'unavailable';
+      dbError = `${err.message} (the in-memory fallback also failed: ${fallbackErr.message})`;
       throw err; // report the original database failure, not the fallback's
     }
 
     const conn = await attempt(memoryUri);
     dbMode = 'in-memory';
+    dbError = null;
     attachConnectionListeners();
 
     // Loaded here rather than at import time to avoid a circular dependency.
@@ -160,4 +192,10 @@ async function disconnectDB() {
 
 const getDbMode = () => dbMode;
 
-module.exports = { connectDB, disconnectDB, getDbMode };
+/** Why the database is unavailable, or null when it is usable. */
+const getDbError = () => dbError;
+
+/** Whether requests that need the database can be served at all. */
+const isDbReady = () => dbMode === 'mongodb' || dbMode === 'in-memory';
+
+module.exports = { connectDB, disconnectDB, getDbMode, getDbError, isDbReady };
