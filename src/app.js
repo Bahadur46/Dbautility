@@ -34,9 +34,16 @@ app.use(
       }
       // A blocked origin is a configuration problem, not a crash: answer 403
       // with the fix, so the browser console shows why instead of a bare 500.
+      // Name the place this deployment actually reads the setting from: a
+      // deployed app has no .env file, so pointing at one sends the operator
+      // to edit a file that never reaches the server.
+      const where = config.isProduction
+        ? "the CORS_ORIGIN environment variable on the host (Azure App Service: Settings > Environment variables)"
+        : 'CORS_ORIGIN in backend/.env';
       return callback(
         ApiError.forbidden(
-          `Origin ${origin} is not allowed by CORS — add it to CORS_ORIGIN in backend/.env and restart the API`
+          `Origin ${origin} is not allowed by CORS — add it to ${where}, then restart the API. ` +
+            `Currently allowed: ${config.corsOrigin.join(', ')}`
         )
       );
     },

@@ -8,6 +8,28 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const required = ['MONGODB_URI'];
 
+/**
+ * Origins allowed when CORS_ORIGIN is not configured.
+ *
+ * A deployment reads this from the host's environment, and when that has not
+ * been set yet the old default — localhost alone — left the deployed frontend
+ * locked out of its own API with a 403 that looks like an application bug.
+ * Listing the known frontend hosts here means a fresh deployment serves the
+ * real site immediately; CORS_ORIGIN still overrides this entirely whenever a
+ * deployment needs a different set.
+ *
+ * Both schemes of each host are listed on purpose: an origin is matched as an
+ * exact string, so a page served over http:// sends "http://host" and an
+ * https:// entry does not match it.
+ */
+const DEFAULT_CORS_ORIGINS = [
+  'https://dba.erpthemes.com',
+  'http://dba.erpthemes.com',
+  // Vite dev server, and `vite preview` for checking a production build.
+  'http://localhost:5173',
+  'http://localhost:4173',
+];
+
 /** The one seeded account, and the environment prefix it reads. */
 const SEED_ROLE = {
   prefix: 'ADMIN',
@@ -48,7 +70,7 @@ const config = {
   port: parseInt(process.env.PORT, 10) || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
   mongoUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/dba_utility',
-  corsOrigin: (process.env.CORS_ORIGIN || 'http://localhost:5173')
+  corsOrigin: (process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGINS.join(','))
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean),
