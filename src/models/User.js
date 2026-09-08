@@ -68,16 +68,12 @@ const userSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     lastLoginAt: { type: Date, default: null },
     /**
-     * True once this account is owned by the app rather than by the environment.
+     * True for an account created or edited in the app.
      *
-     * The seeded administrator is defined by the ADMIN_* variables, and boot
-     * re-applies those values so that editing .env actually takes effect. That would fight an administrator editing the
-     * same account in the app — their change would be undone on the next
-     * restart. So creating an account here, or editing a seeded one, sets this
-     * flag and boot leaves the row alone from then on.
-     *
-     * Default false, which is also what rows written before this existed read
-     * as: they were environment-managed, and they stay that way.
+     * Boot no longer creates or rewrites any account — accounts come from the
+     * app's Users page or from `npm run create:user` — so nothing reads this
+     * flag to decide whether to overwrite a row any more. It is kept because
+     * existing rows carry it, and it still records where an account came from.
      */
     appManaged: { type: Boolean, default: false },
   },

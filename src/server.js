@@ -5,7 +5,6 @@ const { config, assertEnv } = require('./config/env');
 const { connectDB, disconnectDB } = require('./config/db');
 const clusters = require('./config/clusters');
 const { connectAllClusters, disconnectClusters } = require('./config/clusterConnections');
-const { ensureSeedUsers } = require('./services/authService');
 
 // Binds the port, tolerating a previous instance that is still letting go of it
 // (nodemon restarts, a terminal closed without Ctrl+C). Retries a few times
@@ -112,14 +111,6 @@ async function initDatabase() {
     }
 
     await connectDB();
-
-    // Creates the admin accounts on first boot (and on every start of the
-    // in-memory fallback database, which begins empty).
-    const created = await ensureSeedUsers();
-    if (created.length) {
-      // eslint-disable-next-line no-console
-      console.log(`[auth] Seeded admin accounts: ${created.join(', ')}`);
-    }
   } catch (err) {
     /* eslint-disable no-console */
     console.error(`[db] The database is unavailable: ${err.message}`);

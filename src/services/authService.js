@@ -2,7 +2,6 @@
 
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
-const { seedUsersFor } = require('../config/env');
 const { createToken, verifyToken } = require('../utils/token');
 const clusters = require('../config/clusters');
 const { runOnAuthDb, getConnection } = require('../config/clusterConnections');
@@ -104,103 +103,6 @@ function assertMayUseCluster(user, cluster) {
         : `This account is not allowed to use the ${cluster.label} cluster`
     );
   }
-}
-
-/**
- * Create the configured administrator in every cluster's own database.
- *
- * Each cluster gets one System Administrator, written to its own LoginTB, with
- * the same login name and password everywhere — the databases are separate, so
- * the rows cannot collide and the id stays plain "u-1001" in each. Every other
- * account is created in the app, on the Users page.
- */
-async function ensureSeedUsers() {
-  if (!clusters.isEnabled()) return seedIntoCluster(null);
-
-  const created = [];
-  for (const cluster of clusters.clusters) {
-    // Skipped rather than fatal: one unreachable cluster must not stop the
-    // others being seeded, or a network blip leaves the app with no logins.
-    if (!getConnection(cluster.key)) {
-      // eslint-disable-next-line no-console
-      console.warn(`[auth] ${cluster.label} is not connected — its administrator was not seeded.`);
-      continue;
-    }
-    created.push(...(await seedIntoCluster(cluster)));
-  }
-  return created;
-}
-
-/** Create the administrator in one cluster's accounts database. */
-async function seedIntoCluster(cluster) {
-  const seeds = seedUsersFor().map((seed) => ({
-    ...seed,
-    cluster: cluster ? cluster.key : '',
-    clusterLabel: cluster ? cluster.label : '',
-  }));
-
-  return runOnAuthDb(async () => {
-    const created = [];
-    for (const seed of seeds) {
-      // This database holds only this cluster's accounts, so the name alone
-      // identifies the row — there is no other cluster's "admin" to confuse.
-      const exists = await User.findOne({
-        $or: [{ UserName: seed.username }, { userId: seed.userId }],
-      }).select('+Password');
-
-      if (exists) {
-        // An account an administrator has since taken over in the app is left
-        // exactly as they left it. Re-applying .env here would silently undo
-        // their change on every restart, which is the one thing an
-        // app-managed account must never do.
-        if (exists.appManaged) continue;
-
-        // Otherwise the environment defines the account, so a name changed
-        // there has to reach the row — else editing .env would appear to do
-        // nothing and the operator could no longer sign in.
-        const renamed = exists.UserName !== seed.username;
-        // The row records which cluster it belongs to, so a row seeded before
-        // the clusters were configured — carrying a blank value — is stamped.
-        const repinned = (exists.cluster || '') !== (seed.cluster || '');
-        // Rows written while passwords were hashed can no longer be matched
-        // against what the user types, so those are reset too.
-        const unusable =
-          typeof exists.Password === 'string' && exists.Password.startsWith('scrypt$');
-
-        if (renamed || unusable || repinned) {
-          const was = exists.UserName;
-          exists.UserName = seed.username;
-          exists.displayName = seed.userName;
-          exists.cluster = seed.cluster || '';
-          if (renamed || unusable) exists.setPassword(seed.password);
-          await exists.save();
-          // eslint-disable-next-line no-console
-          console.log(
-            renamed
-              ? `[auth] renamed "${was}" to "${seed.username}" (${seed.clusterLabel || 'every cluster'}).`
-              : unusable
-              ? `[auth] reset the stored password for "${exists.UserName}" (${seed.clusterLabel || 'every cluster'}).`
-              : `[auth] "${exists.UserName}" now signs in to ${seed.clusterLabel || 'every cluster'}.`
-          );
-        }
-        continue;
-      }
-
-      const user = new User({
-        userId: seed.userId,
-        UserName: seed.username,
-        displayName: seed.userName,
-        role: seed.role,
-        // The cluster this row answers for. Blank only in single-database mode.
-        cluster: seed.cluster || '',
-      });
-      user.setPassword(seed.password);
-      await user.save();
-      created.push(seed.clusterLabel ? `${user.UserName} (${seed.clusterLabel})` : user.UserName);
-    }
-
-    return created;
-  }, cluster);
 }
 
 /**
@@ -624,7 +526,6 @@ async function listUsers() {
 }
 
 module.exports = {
-  ensureSeedUsers,
   login,
   selectCluster,
   clustersFor,
