@@ -4,3 +4,7 @@ node_modules/
 *.log
 coverage/
 .DS_Store
+
+# Generated for pasting into Azure > Environment variables > Advanced edit.
+# Holds the connection string and AUTH_SECRET — never commit it.
+azure-appsettings.local.json
