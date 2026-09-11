@@ -8,7 +8,7 @@ const analyzerRoutes = require('./analyzerRoutes');
 const queryExecutorRoutes = require('./queryExecutorRoutes');
 const { getDbMode, getDbError } = require('../config/db');
 const clusters = require('../config/clusters');
-const { requireCluster } = require('../middleware/auth');
+const { requireAuth, requireCluster } = require('../middleware/auth');
 const requireDatabase = require('../middleware/requireDatabase');
 
 const router = express.Router();
@@ -42,9 +42,16 @@ router.get('/health', (req, res) => {
 router.use('/auth', requireDatabase, authRoutes);
 // Everything below reads or writes cluster data, so it needs a database and
 // must be served from exactly one cluster.
-router.use('/manual-indexes', requireDatabase, requireCluster, manualIndexRoutes);
-router.use('/audit-logs', requireDatabase, requireCluster, auditLogRoutes);
-router.use('/analyzer', requireDatabase, requireCluster, analyzerRoutes);
-router.use('/query-executor', requireDatabase, requireCluster, queryExecutorRoutes);
+// requireAuth is not redundant next to requireCluster. requireCluster starts
+// with `if (!clusters.isEnabled()) return next()`, so on a deployment where the
+// CLUSTER_* variables are not configured it passes everything through — and
+// these routes were then reachable with no token at all. Authentication must
+// not depend on another feature happening to be switched on.
+const dataRoute = [requireDatabase, requireAuth, requireCluster];
+
+router.use('/manual-indexes', ...dataRoute, manualIndexRoutes);
+router.use('/audit-logs', ...dataRoute, auditLogRoutes);
+router.use('/analyzer', ...dataRoute, analyzerRoutes);
+router.use('/query-executor', ...dataRoute, queryExecutorRoutes);
 
 module.exports = router;
