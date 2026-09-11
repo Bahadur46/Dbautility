@@ -4,13 +4,12 @@ const mongoose = require('mongoose');
 const { defineModel } = require('./registry');
 
 /**
- * One row per sign-in attempt, stored in the `LoginTB` collection, beside the accounts.
+ * One row per sign-in attempt, stored in its own `LoginHistory` collection.
  *
- * The rows share LoginTB with the accounts themselves, in the application's own
- * database — the one from the current connection string — because an attempt
- * against an unknown cluster still has to be recorded somewhere. An attempt row
- * is told apart from an account row by its `outcome` field, which only attempts
- * carry. Each row carries the cluster it
+ * The rows live in the application's own database — the one from the current
+ * connection string — because an attempt against an unknown cluster still has
+ * to be recorded somewhere, but NOT in LoginTB: that collection holds the
+ * accounts and nothing else. Each row carries the cluster it
  * was made against, and the listing only ever returns the rows of the cluster
  * the reader is signed in to, so a session still sees its own cluster alone.
  *
@@ -70,7 +69,7 @@ const loginRecordSchema = new mongoose.Schema(
   {
     timestamps: false,
     versionKey: false,
-    collection: 'LoginTB',
+    collection: 'LoginHistory',
   }
 );
 
@@ -81,8 +80,11 @@ loginRecordSchema.index({ success: 1, timestamp: -1 });
 
 loginRecordSchema.statics.OUTCOMES = OUTCOMES;
 
-// Sign-in history belongs beside the accounts, in the cluster's own database.
-const LoginRecord = defineModel('LoginRecord', loginRecordSchema, 'LoginTB');
+// Central, in the login database but in a collection of its own: one history
+// for the deployment, each row stamped with the cluster it was made against.
+const LoginRecord = defineModel('LoginRecord', loginRecordSchema, 'LoginHistory', {
+  central: true,
+});
 
 module.exports = LoginRecord;
 module.exports.OUTCOMES = OUTCOMES;

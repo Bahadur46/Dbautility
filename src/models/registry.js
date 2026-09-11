@@ -27,12 +27,13 @@ function registerAll(connection) {
  * model itself (constant lists, for example), which cannot live on the model
  * because the model does not exist yet.
  *
- * `options.central` marks a model that does NOT belong to a cluster. The audit
- * trail is deployment-wide: it is always resolved against the connection
- * MONGODB_URI names, whichever cluster the request is working on, so there is
- * one trail however many clusters there are. Everything else — the accounts,
- * the login history, the manual index definitions — lives in the cluster's own
- * database and is reached through the cluster's own connection.
+ * `options.central` marks a model that does NOT belong to a cluster. It is
+ * always resolved against the connection MONGODB_URI names, whichever cluster
+ * the request is working on. Three models are central: the login accounts and
+ * the sign-in history beside them (one credential set for the deployment) and
+ * the audit trail (one trail however many clusters there are). The manual index
+ * definitions are the cluster-wise part — they live in the cluster's own
+ * database and are reached through the cluster's own connection.
  */
 function defineModel(name, schema, collectionName, options = {}) {
   const central = Boolean(options.central);

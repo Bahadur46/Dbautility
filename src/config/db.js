@@ -79,7 +79,7 @@ function printDiagnostics(uri, err) {
   console.error(` Tried : ${maskUri(uri)}`);
   console.error(` Reason: ${err.message}\n`);
 
-  if (uri.startsWith('mongodb+srv://')) {
+  if (uri.startsWith('028_db_user:HDTiC60Z7wBPxaey@clusterdhs.c0ai6pq.mongodb.net/')) {
     console.error(' This is a MongoDB Atlas cluster. Check, in order:');
     console.error('   1. Atlas > Network Access > Add IP Address.');
     console.error('      Add your current IP (or 0.0.0.0/0 for development).');

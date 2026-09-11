@@ -5,6 +5,7 @@ const ManualIndex = require('../models/ManualIndex');
 const AuditLog = require('../models/AuditLog');
 const auditService = require('../services/auditService');
 const indexService = require('../services/indexService');
+const optimizationService = require('../services/optimizationService');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { sendSuccess, buildPagination } = require('../utils/apiResponse');
@@ -84,7 +85,7 @@ function specOf(source) {
 function parseListQuery(query) {
   const page = Math.max(parseInt(query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(query.limit, 10) || 10, 1), 100);
-  const allowedSort = ['indexName', 'createdAt', 'updatedAt', 'status', 'indexType', 'createdBy', 'collectionName'];
+  const allowedSort = ['indexName', 'createdAt', 'updatedAt', 'status', 'indexType', 'createdBy', 'collectionName', 'databaseName'];
   const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'createdAt';
   const sortOrder = query.sortOrder === 'asc' ? 1 : -1;
   return { page, limit, sortBy, sortOrder };
@@ -140,7 +141,7 @@ const createManualIndex = asyncHandler(async (req, res) => {
     throw err;
   }
 
-  await auditService.logCreate({
+  const createEntry = await auditService.logCreate({
     index,
     user: req.user,
     req,
@@ -152,6 +153,19 @@ const createManualIndex = asyncHandler(async (req, res) => {
       : `Manual Index "${index.indexName}" was created as ${index.status} (definition only, not applied to MongoDB)`,
   });
 
+  // Only a real index counts towards the dashboard's "Index Created" card. A
+  // DRAFT or INACTIVE definition applied nothing, so counting it would claim
+  // an optimisation the database never received.
+  if (applied) {
+    await optimizationService.recordIndexCreated({
+      index,
+      user: req.user,
+      auditLog: createEntry,
+      databaseName: index.databaseName || indexService.defaultDatabaseName(),
+      notes: indexService.describeSpec(index),
+    });
+  }
+
   return sendSuccess(res, {
     statusCode: 201,
     message: applied
@@ -162,23 +176,79 @@ const createManualIndex = asyncHandler(async (req, res) => {
 });
 
 /**
+ * ?startDate/?endDate -> a Mongo range condition, or null when neither is given.
+ * A date with no time in it means the whole of that day, otherwise "to 5 Sep"
+ * would drop 5 Sep itself.
+ */
+function buildDateRange(startDate, endDate) {
+  if (!startDate && !endDate) return null;
+  const range = {};
+  if (startDate) {
+    const from = new Date(startDate);
+    if (Number.isNaN(from.getTime())) throw ApiError.badRequest('Invalid startDate');
+    range.$gte = from;
+  }
+  if (endDate) {
+    const to = new Date(endDate);
+    if (Number.isNaN(to.getTime())) throw ApiError.badRequest('Invalid endDate');
+    if (!/T/.test(String(endDate))) to.setHours(23, 59, 59, 999);
+    range.$lte = to;
+  }
+  return range;
+}
+
+/**
  * GET /api/manual-indexes
  * Listing is not an audited action — only opening a specific index's details is.
  */
 const getManualIndexes = asyncHandler(async (req, res) => {
   const { page, limit, sortBy, sortOrder } = parseListQuery(req.query);
-  const { search, status, indexType, collectionName, databaseName, applied } = req.query;
+  const { search, status, lastAction, indexType, collectionName, databaseName, applied, startDate, endDate } =
+    req.query;
 
   const filter = {};
   if (search && String(search).trim()) {
     const rx = containsInsensitive(String(search).trim());
     filter.$or = [{ indexName: rx }, { description: rx }, { collectionName: rx }, { createdBy: rx }];
   }
-  if (status) filter.status = status;
-  if (indexType) filter.indexType = indexType;
-  if (collectionName) filter.collectionName = collectionName;
-  if (databaseName) filter.databaseName = databaseName;
+  // String(): Express' extended query parser turns ?status[$ne]=DRAFT into an
+  // object, which went into the Mongo filter as an operator and silently
+  // inverted the filter the caller asked for.
+  if (status) filter.status = String(status);
+  if (indexType) filter.indexType = String(indexType);
+  if (collectionName) filter.collectionName = String(collectionName);
+  if (databaseName) filter.databaseName = String(databaseName);
   if (applied === 'true' || applied === 'false') filter.applied = applied === 'true';
+
+  // The list's date column is when the definition was created, so the range is
+  // read against createdAt.
+  const createdRange = buildDateRange(startDate, endDate);
+  if (createdRange) filter.createdAt = createdRange;
+
+  // ?lastAction=CREATE|UPDATE|DELETE|DROP — the list's Status column is what
+  // was last done to an index, so filtering it means asking the audit trail
+  // which indexes end on that action, then listing only those.
+  if (lastAction) {
+    const wanted = String(lastAction).toUpperCase();
+    const latest = await AuditLog.aggregate([
+      { $match: { indexId: { $ne: null }, action: { $ne: 'VIEW' } } },
+      { $sort: { timestamp: -1 } },
+      { $group: { _id: '$indexId', action: { $first: '$action' } } },
+      { $match: { action: wanted } },
+    ]);
+    const ids = latest.map((row) => row._id);
+    if (wanted === 'CREATE') {
+      // A row with no audit entry at all reads as CREATE in the list, so it
+      // has to answer this filter too.
+      const audited = await AuditLog.distinct('indexId', {
+        indexId: { $ne: null },
+        action: { $ne: 'VIEW' },
+      });
+      filter.$and = [{ $or: [{ _id: { $in: ids } }, { _id: { $nin: audited } }] }];
+    } else {
+      filter._id = { $in: ids };
+    }
+  }
 
   const [items, total] = await Promise.all([
     ManualIndex.find(filter)
@@ -189,9 +259,40 @@ const getManualIndexes = asyncHandler(async (req, res) => {
     ManualIndex.countDocuments(filter),
   ]);
 
+  // What was last done to each row, for the list's Status column: the newest
+  // audit entry that changed the index. VIEW is excluded — reading an index is
+  // not something that happened to it, and it would mask every real change.
+  const lastActions = items.length
+    ? await AuditLog.aggregate([
+        { $match: { indexId: { $in: items.map((i) => i._id) }, action: { $ne: 'VIEW' } } },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: '$indexId',
+            action: { $first: '$action' },
+            at: { $first: '$timestamp' },
+            by: { $first: '$userName' },
+          },
+        },
+      ])
+    : [];
+  const lastByIndex = new Map(lastActions.map((row) => [String(row._id), row]));
+
+  const data = items.map((item) => {
+    const last = lastByIndex.get(String(item._id));
+    return {
+      ...item,
+      // No audit entry can only mean the row predates the trail; CREATE is what
+      // must have happened, and its own timestamps say when.
+      lastAction: last ? last.action : 'CREATE',
+      lastActionAt: last ? last.at : item.updatedAt,
+      lastActionBy: last ? last.by : item.updatedBy || item.createdBy,
+    };
+  });
+
   return sendSuccess(res, {
     message: 'Manual Indexes fetched successfully',
-    data: items,
+    data,
     meta: buildPagination({ page, limit, total }),
   });
 });
@@ -354,7 +455,7 @@ const deleteManualIndex = asyncHandler(async (req, res) => {
     dropResult = await indexService.dropIndex(specOf(index));
   }
 
-  await auditService.logDelete({
+  const deleteEntry = await auditService.logDelete({
     index,
     user: req.user,
     req,
@@ -363,6 +464,19 @@ const deleteManualIndex = asyncHandler(async (req, res) => {
       ? `Manual Index "${index.indexName}" was deleted and the real index was dropped from "${index.databaseName || indexService.defaultDatabaseName()}.${index.collectionName}"`
       : `Manual Index "${index.indexName}" was deleted (no real index to drop)`,
   });
+
+  // The definition going away is bookkeeping; the index leaving MongoDB is the
+  // optimisation. Only the second one belongs on the dashboard.
+  if (dropResult.dropped) {
+    await optimizationService.recordIndexDropped({
+      databaseName: index.databaseName || indexService.defaultDatabaseName(),
+      collectionName: index.collectionName,
+      indexName: index.appliedIndexName || index.indexName,
+      user: req.user,
+      auditLog: deleteEntry,
+      notes: `Manual Index "${index.indexName}" was deleted`,
+    });
+  }
 
   await ManualIndex.deleteOne({ _id: index._id });
 
@@ -478,7 +592,7 @@ const dropManualIndex = asyncHandler(async (req, res) => {
   index.updatedBy = req.user.userName;
   await index.save();
 
-  await auditService.record({
+  const dropEntry = await auditService.record({
     action: 'DROP',
     index,
     user: req.user,
@@ -490,6 +604,20 @@ const dropManualIndex = asyncHandler(async (req, res) => {
       ? `Index "${droppedName}" was dropped from ${databaseLabel}; Manual Index "${index.indexName}" was kept and set to INACTIVE`
       : `Manual Index "${index.indexName}" was set to INACTIVE; its index was already absent from ${databaseLabel} (${dropResult.reason})`,
   });
+
+  // An index that was already absent was not dropped by this request, so this
+  // request performed no optimisation to record.
+  if (dropResult.dropped) {
+    await optimizationService.recordIndexDropped({
+      databaseName: index.databaseName || indexService.defaultDatabaseName(),
+      collectionName: index.collectionName,
+      indexName: droppedName,
+      user: req.user,
+      auditLog: dropEntry,
+      manualIndexId: index._id,
+      notes: 'Dropped from the Manual Index page; the definition was kept as INACTIVE',
+    });
+  }
 
   return sendSuccess(res, {
     message: dropResult.dropped
@@ -580,6 +708,10 @@ const getDatabases = asyncHandler(async (req, res) => {
     data: {
       databases,
       current: indexService.defaultDatabaseName(),
+      // No default can be resolved here, so the caller must name one. Sent
+      // rather than inferred from an empty `current`, which could equally mean
+      // "not loaded yet".
+      requiresDatabase: indexService.requiresExplicitDatabase(),
       connected: activeConnection().name || null,
       cluster: activeCluster() ? { key: activeCluster().key, label: activeCluster().label } : null,
     },
@@ -588,18 +720,35 @@ const getDatabases = asyncHandler(async (req, res) => {
 
 /** GET /api/manual-indexes/stats/summary — dashboard aggregates. */
 const getSummary = asyncHandler(async (req, res) => {
+  // ManualIndex lives in the caller's cluster database, so it is scoped by the
+  // connection alone. AuditLog does not: it is one central collection shared by
+  // every cluster, so each of its queries has to name the cluster or the
+  // dashboard reports — and lists the recent activity of — every tenant.
+  const cluster = activeCluster();
+  const auditScope = cluster ? { cluster: cluster.key } : {};
+
+  // ?startDate/?endDate narrows the whole report to a period: the index figures
+  // by when the definition was created, the audit figures by when the entry
+  // happened. Without either the report still covers everything, as before.
+  const range = buildDateRange(req.query.startDate, req.query.endDate);
+  const indexScope = range ? { createdAt: range } : {};
+  const logScope = range ? { ...auditScope, timestamp: range } : auditScope;
+
   const [totalIndexes, byStatus, byType, totalLogs, recentLogs, actionCounts, appliedCount] =
     await Promise.all([
-      ManualIndex.countDocuments(),
-      ManualIndex.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-      ManualIndex.aggregate([{ $group: { _id: '$indexType', count: { $sum: 1 } } }]),
-      AuditLog.countDocuments(),
+      ManualIndex.countDocuments(indexScope),
+      ManualIndex.aggregate([{ $match: indexScope }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+      ManualIndex.aggregate([{ $match: indexScope }, { $group: { _id: '$indexType', count: { $sum: 1 } } }]),
+      AuditLog.countDocuments(logScope),
       // VIEW entries dominate the feed and drown out the changes that matter,
       // so the dashboard shows the actions that altered something. The full
       // count is still reported separately in actionCounts.
-      AuditLog.find({ action: { $ne: 'VIEW' } }).sort({ timestamp: -1 }).limit(6).lean(),
-      AuditLog.aggregate([{ $group: { _id: '$action', count: { $sum: 1 } } }]),
-      ManualIndex.countDocuments({ applied: true }),
+      AuditLog.find({ ...logScope, action: { $ne: 'VIEW' } })
+        .sort({ timestamp: -1 })
+        .limit(6)
+        .lean(),
+      AuditLog.aggregate([{ $match: logScope }, { $group: { _id: '$action', count: { $sum: 1 } } }]),
+      ManualIndex.countDocuments({ ...indexScope, applied: true }),
     ]);
 
   const toMap = (rows) =>

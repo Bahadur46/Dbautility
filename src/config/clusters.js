@@ -4,6 +4,10 @@ const dotenv = require('dotenv');
 const path = require('path');
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// This module reads process.env directly and may load before config/env.js,
+// so it seeds the shipped defaults itself. applyDefaults never overwrites an
+// existing value, so doing it twice is harmless.
+require('./defaults');
 
 /**
  * The database clusters this deployment serves.
@@ -29,11 +33,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
  *   CLUSTER_<KEY>_TARGET_DB  the database indexes are applied to (optional,
  *                            defaults to TARGET_DB, then the URI's database)
  *
- * A cluster with no URI of its own is served from the connection string this
- * deployment already runs on — MONGODB_URI — with the database swapped for the
- * cluster's own. Same host and credentials, a separate database per cluster:
- * signing in to a cluster therefore shows that cluster's database and nothing
- * else. Set CLUSTER_<KEY>_URI only when a cluster really is a different server.
+ * MONGODB_URI is used for login ONLY — no cluster is ever served from it. A
+ * cluster connects over CLUSTER_<KEY>_URI, or CLUSTER_<KEY>_DATA_URI when that
+ * is all it has; a cluster with neither is not offered at all.
  */
 const DEFINITIONS = [
   { key: 'ananda', label: 'Ananda' },
@@ -44,8 +46,8 @@ const DEFINITIONS = [
 
 const envKey = (key) => key.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 
-// The connection string this deployment already runs on. A cluster without a
-// URI of its own borrows it and only replaces the database name.
+// The login connection string. Only used to keep its accounts database out of
+// a cluster's browsable list — never to connect a cluster.
 const currentUri = (process.env.MONGODB_URI || '').trim();
 
 /**
@@ -91,13 +93,12 @@ const clusters = DEFINITIONS.map((def) => {
   return {
     ...def,
     dbName,
-    // A server of its own when one is configured — aimed at `dbName`, so a URI
-    // that stops at the host still lands on a named database rather than the
-    // driver's default. Otherwise the current connection string, pointed at
-    // this cluster's database.
-    uri: ownUri ? withDatabase(ownUri, dbName) : withDatabase(currentUri, dbName),
-    // True when the cluster rides on the app's own connection string.
-    shared: !ownUri,
+    // Aimed at `dbName`, so a URI that stops at the host still lands on a named
+    // database rather than the driver's default.
+    // MONGODB_URI is the login database and is never borrowed: a cluster is
+    // reached over its own URI, else its data server, else not at all.
+    uri: withDatabase(ownUri || dataUri, dbName),
+    shared: false,
     // The server the indexes are created on, when that is NOT the server the
     // cluster's own records live on. This is the case where the application
     // must leave no trace on the data server: nothing of its own is written
@@ -173,6 +174,13 @@ const isEnabled = () => clusters.length > 0;
 /** The list the login form renders — no connection strings. */
 const listPublic = () => clusters.map(({ key, label }) => ({ key, label }));
 
+/**
+ * Every defined cluster, configured or not — what the dashboard shows, so a
+ * cluster with no connection string still has its place instead of vanishing.
+ */
+const listAll = () =>
+  DEFINITIONS.map(({ key, label }) => ({ key, label, configured: byKey.has(key) }));
+
 module.exports = {
   DEFINITIONS,
   clusters,
@@ -180,5 +188,6 @@ module.exports = {
   normalizeKey,
   isEnabled,
   listPublic,
+  listAll,
   foreignDatabases,
 };

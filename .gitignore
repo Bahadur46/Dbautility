@@ -8,3 +8,11 @@ coverage/
 # Generated for pasting into Azure > Environment variables > Advanced edit.
 # Holds the connection string and AUTH_SECRET — never commit it.
 azure-appsettings.local.json
+
+# Every local variant of the environment file, not just .env itself. A copy
+# like .env.bak carries exactly the same secrets and is just as dangerous in
+# the repository — and in the deployment artifact, which is the whole backend
+# folder.
+.env.*
+!.env.example
+*.bak

@@ -137,9 +137,9 @@ const logDelete = ({ index, user, req, details, mongoCommand = '' }) =>
   });
 
 /**
- * Record an index dropped straight from the database by the analyzer, with no
- * Manual Index record behind it. Written before the caller returns, so a drop
- * can never happen without a trace.
+ * Record an index dropped straight from the database with no Manual Index
+ * record behind it — a command run from the Query Executor. Written before the
+ * caller returns, so a drop can never happen without a trace.
  */
 const logIndexDrop = ({
   databaseName,
@@ -149,9 +149,8 @@ const logIndexDrop = ({
   user,
   req,
   mongoCommand = '',
-  // Where the drop came from matters when reading the trail back: the analyzer
-  // flagged it as unused, or somebody pasted the command themselves. The
-  // default keeps the analyzer's wording for the caller that had it first.
+  // Where the drop came from matters when reading the trail back, so callers
+  // say so. The default describes a drop of an index nothing here manages.
   details = '',
 }) =>
   record({
@@ -162,7 +161,7 @@ const logIndexDrop = ({
     previousValues: { databaseName, collectionName, indexName, key },
     details:
       details ||
-      `Index "${indexName}" was dropped from ${databaseName}.${collectionName} by ${user.userName} (unused index cleanup)`,
+      `Index "${indexName}" was dropped from ${databaseName}.${collectionName} by ${user.userName}`,
     req,
   });
 
@@ -183,6 +182,11 @@ async function purgeOlderThan({ before, user, req, dryRun = false }) {
   if (Number.isNaN(cutoff.getTime())) throw new Error('Invalid cut-off date');
 
   const filter = { timestamp: { $lt: cutoff }, action: { $ne: 'PURGE' } };
+  // Scoped to the caller's cluster. This collection is shared by every
+  // cluster, so an unscoped deleteMany here erased the OTHER clusters'
+  // audit history too — the one thing an audit log must never allow.
+  const purgeCluster = activeCluster();
+  if (purgeCluster) filter.cluster = purgeCluster.key;
   const matched = await AuditLog.countDocuments(filter);
 
   if (dryRun) return { matched, deleted: 0, cutoff, dryRun: true };
@@ -216,6 +220,9 @@ async function purgeOlderThan({ before, user, req, dryRun = false }) {
  */
 async function purgeViewEntries({ user, req, dryRun = false }) {
   const filter = { action: 'VIEW' };
+  // Same reason as purgeOlderThan: never reach past the caller's cluster.
+  const viewCluster = activeCluster();
+  if (viewCluster) filter.cluster = viewCluster.key;
   const matched = await AuditLog.countDocuments(filter);
 
   if (dryRun) return { matched, deleted: 0, dryRun: true };

@@ -8,12 +8,11 @@ const { runOnAuthDb } = require('../config/clusterConnections');
  * The sign-in history.
  *
  * Every attempt — accepted or refused — is written here by the auth service,
- * into the accounts database of the cluster it was made against, beside the
- * LoginTB it was checked against. An attempt naming no valid cluster is
- * refused before it reaches this point, so there is always somewhere to put a
- * row. Rows still carry their cluster and the listing is still narrowed to the
- * caller's own, which keeps the history right for a single-database
- * deployment too.
+ * into the one login database (dba_utility), beside the LoginTB it was checked
+ * against. An attempt made before any cluster has been chosen is recorded too,
+ * with a blank cluster: sign-in comes first and the cluster afterwards. Rows
+ * carry the cluster they were made on and the listing is narrowed to the
+ * caller's own, so a session still sees its own cluster's history alone.
  */
 
 /** Request metadata worth keeping next to the attempt. */

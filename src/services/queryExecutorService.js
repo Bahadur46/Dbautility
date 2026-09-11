@@ -3,6 +3,7 @@
 const ApiError = require('../utils/ApiError');
 const indexService = require('./indexService');
 const auditService = require('./auditService');
+const optimizationService = require('./optimizationService');
 const { activeCluster } = require('../config/clusterConnections');
 
 /**
@@ -132,7 +133,7 @@ function parseIndexNameArg(argText) {
  * A drop is audited before the response is sent, so an index can never be
  * removed through this console without the entry that records it.
  */
-async function execute({ command, user, req }) {
+async function execute({ command, reason, user, req }) {
   const parsed = parseCommand(command);
   // Resolves the target the same way every other write does, so the executor
   // inherits the reserved-database and other-cluster refusals rather than
@@ -182,7 +183,33 @@ async function execute({ command, user, req }) {
   // never removable, whatever the paste says.
   await indexService.dropIndexByName({ databaseName: parsed.databaseName, collectionName, indexName });
 
-  await auditService.logIndexDrop({
+  // Is this one of ours? Read after the drop but before the audit entry, so a
+  // failed drop cannot deactivate a record for an index that is still there.
+  //
+  // Without this the register and the database drift apart in the worst
+  // direction: the record goes on claiming applied: true with an
+  // appliedIndexName that no longer exists, Sync reports drift nobody caused,
+  // and the definition that would rebuild the index looks live when it is not.
+  const ManualIndex = require('../models/ManualIndex');
+  const owner = await ManualIndex.findOne({
+    collectionName,
+    appliedIndexName: indexName,
+    $or: [{ databaseName }, { databaseName: '' }],
+  });
+
+  if (owner) {
+    // The definition survives — it is what makes the drop reversible — but it
+    // stops asserting an index that is deliberately gone.
+    owner.applied = false;
+    owner.appliedIndexName = '';
+    owner.appliedAt = null;
+    owner.status = 'INACTIVE';
+    owner.lastSyncError = '';
+    owner.updatedBy = user.userName;
+    await owner.save();
+  }
+
+  const auditEntry = await auditService.logIndexDrop({
     databaseName,
     collectionName,
     indexName,
@@ -192,9 +219,30 @@ async function execute({ command, user, req }) {
     // The command as typed, not a rebuilt one: the entry should show exactly
     // what was pasted and run.
     mongoCommand: String(command).trim(),
-    details:
-      `Index "${indexName}" was dropped from ${databaseName}.${collectionName} by ${user.userName} ` +
-      '(run from the Query Executor)',
+    // Why it was dropped, when whoever dropped it said so. Kept first: read
+    // back months later, the reason is the part nobody can reconstruct, while
+    // the rest of the sentence is derivable from the entry's own fields.
+    details: [
+      reason && String(reason).trim() ? `Reason: ${String(reason).trim()}` : '',
+      `Index "${indexName}" was dropped from ${databaseName}.${collectionName} by ${user.userName}`,
+      owner ? `Manual Index "${owner.indexName}" was kept and set to INACTIVE` : '',
+    ]
+      .filter(Boolean)
+      .join(' — ')
+      .slice(0, 500),
+  });
+
+  // A drop typed by hand is still a drop: the dashboard counts the change made
+  // to the database, not the screen it was requested from.
+  await optimizationService.recordIndexDropped({
+    databaseName,
+    collectionName,
+    indexName,
+    key: existing.key,
+    user,
+    auditLog: auditEntry,
+    manualIndexId: owner ? owner._id : null,
+    notes: reason && String(reason).trim() ? String(reason).trim() : 'Dropped from the Query Executor',
   });
 
   return {

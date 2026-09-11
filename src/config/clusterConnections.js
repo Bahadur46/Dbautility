@@ -13,14 +13,16 @@ const { registerAll } = require('../models/registry');
  * The active cluster is carried in async local storage rather than passed down
  * through every service call: it is set once, by the user-context middleware,
  * from the `cluster` claim in the session token, and everything the request
- * touches afterwards — models, index creation, the analyzer — resolves against
+ * touches afterwards — models, index creation, the dashboard — resolves against
  * that cluster's connection automatically. Cross-cluster reads are impossible
  * because no code path can reach another connection.
  *
- * Sign-in is part of that isolation: a cluster's login accounts live in the
- * cluster's own database, not in one shared LoginTB. MONGODB_URI stays
- * connected as the fallback for single-database mode and boot-time work, so
- * with no clusters configured the app runs exactly as it did before.
+ * Sign-in sits outside that isolation on purpose: there is ONE set of login
+ * accounts for the deployment, in the database MONGODB_URI names
+ * (dba_utility), which is used for login and nothing else. One sign-in, then a
+ * cluster picked inside the app — and every cluster switch afterwards is a step
+ * on the same session, not a second login. With no clusters configured the app
+ * runs on that database alone, exactly as it did before.
  */
 
 const CONNECT_TIMEOUT_MS = 10000;
@@ -134,24 +136,25 @@ function centralConnection() {
 }
 
 /**
- * Run `fn` against a cluster's own accounts database.
+ * Run `fn` against the login database.
  *
- * Sign-in is cluster-wise: LoginTB (and the login history beside it) lives in
- * the cluster's own database, so Ananda's accounts are in Ananda's database and
- * Kamdhenu's in Kamdhenu's. Which cluster is being signed in to therefore
- * decides which accounts are consulted, and an account in one cluster is
- * invisible to every other.
+ * Sign-in is NOT cluster-wise. LoginTB — the accounts and the sign-in history
+ * beside them — lives in ONE database, the one MONGODB_URI names
+ * (dba_utility), and that database is used for nothing else. So there is one
+ * username and one password however many clusters the deployment serves, and
+ * signing in is a single act: the cluster is chosen afterwards, inside the app,
+ * and can be changed again without signing in a second time.
  *
- * The cluster is taken from the argument, or the ambient one when none is
- * given. With no cluster — single-database mode, and boot-time work — this is
- * the default connection, which is the behaviour that has always applied there.
+ * The cluster argument therefore no longer decides which accounts are read —
+ * it only rides along in the store so a record written here is stamped with the
+ * cluster the session is on.
  */
 function runOnAuthDb(fn, cluster = null) {
   const target = cluster || storage.getStore()?.cluster || null;
   const key = target ? target.key || target : null;
   const resolved = key ? clusters.getCluster(key) : null;
-  const connection = (resolved && connections.get(resolved.key)) || centralConnection();
-  return storage.run({ cluster: resolved, connection }, fn);
+  // Always the login database, never a cluster's own.
+  return storage.run({ cluster: resolved, connection: centralConnection() }, fn);
 }
 
 /**

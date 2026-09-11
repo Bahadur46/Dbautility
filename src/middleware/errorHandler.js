@@ -47,7 +47,11 @@ function errorHandler(err, req, res, next) {
 
   const body = { success: false, message };
   if (errors) body.errors = errors;
-  if (!config.isProduction && statusCode >= 500) body.stack = err.stack;
+  // Opt IN to the stack, rather than out of it. `!isProduction` was true
+  // whenever NODE_ENV was simply unset — so a deployment that forgot one
+  // environment variable returned absolute server paths and the module
+  // layout to any caller who could provoke a 500.
+  if (config.nodeEnv === 'development' && statusCode >= 500) body.stack = err.stack;
 
   res.status(statusCode).json(body);
 }

@@ -10,9 +10,9 @@ const { sendSuccess } = require('../utils/apiResponse');
  *
  * Run one pasted mongo shell index command against the cluster in session.
  *
- * Administrator only, for the same reason the analyzer's drop is: this removes
+ * Administrator only: this removes
  * an index the application never created, and something else may still depend
- * on it. Unlike the analyzer there is no "unused" evidence behind the request —
+ * on it. There is no "unused" evidence behind the request —
  * the operator is asserting it, so the account making the assertion has to be
  * one that carries the responsibility.
  */
@@ -30,7 +30,7 @@ const runCommand = asyncHandler(async (req, res) => {
     ]);
   }
 
-  const result = await queryExecutor.execute({ command, user: req.user, req });
+  const result = await queryExecutor.execute({ command, reason: req.body?.reason, user: req.user, req });
 
   return sendSuccess(res, { message: result.message, data: result });
 });

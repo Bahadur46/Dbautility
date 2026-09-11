@@ -101,6 +101,19 @@ function resolveDatabaseName(databaseName) {
   return name;
 }
 
+/**
+ * Whether this cluster can resolve a database on its own.
+ *
+ * False when indexes go to a separate data server whose connection string names
+ * no database and no TARGET_DB is configured — the case where refusing to guess
+ * is right, because the driver's default would create a database of ours on a
+ * server that must carry none. A caller that knows this can require the choice
+ * up front rather than letting the request fail after the form is filled in.
+ */
+function requiresExplicitDatabase() {
+  return !defaultDatabaseName();
+}
+
 /** The default target database, used when a record does not name one. */
 function defaultDatabaseName() {
   const cluster = activeCluster();
@@ -313,7 +326,7 @@ async function getSyncStatus(doc) {
  *
  * Separate from `dropIndex` on purpose: that one only ever removes an index a
  * Manual Index record owns, which is the right guard for the CRUD path. This
- * one exists for the analyzer, where the whole point is acting on indexes the
+ * one exists for the Query Executor, where the whole point is acting on indexes the
  * application did not create — so it carries its own guards instead.
  */
 async function dropIndexByName({ databaseName, collectionName, indexName }) {
@@ -415,6 +428,7 @@ module.exports = {
   listFields,
   resolveDatabaseName,
   defaultDatabaseName,
+  requiresExplicitDatabase,
   database,
   dropIndex,
   listCollectionIndexes,

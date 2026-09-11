@@ -161,4 +161,7 @@ userSchema.index(
 
 // Not central: each cluster keeps its accounts in its own database, so this
 // resolves against the connection of the cluster being signed in to.
-module.exports = defineModel('User', userSchema, 'LoginTB');
+// Accounts are central: ONE set of credentials for the whole deployment, in
+// the database MONGODB_URI names (dba_utility), whichever cluster the session
+// goes on to work on. A cluster database holds no accounts of its own.
+module.exports = defineModel('User', userSchema, 'LoginTB', { central: true });

@@ -5,6 +5,9 @@ const crypto = require('crypto');
 const dotenv = require('dotenv');
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// After dotenv, so a developer's .env always wins; before config is built,
+// so everything below sees the shipped values.
+require('./defaults');
 
 const required = ['MONGODB_URI'];
 
@@ -33,7 +36,11 @@ const DEFAULT_CORS_ORIGINS = [
 const config = {
   port: parseInt(process.env.PORT, 10) || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  mongoUri: process.env.MONGODB_URI || 'mongodb+srv://bahadur3028_db_user:HDTiC60Z7wBPxaey@clusterdhs.c0ai6pq.mongodb.net',
+  // No fallback on purpose. A connection string is a credential: hardcoding
+  // one here put a live Atlas user and password into every clone of this
+  // repository and into the deployment artifact. It comes from the
+  // environment or the app does not start — see assertEnv() below.
+  mongoUri: (process.env.MONGODB_URI || '').trim(),
   corsOrigin: (process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGINS.join(','))
     .split(',')
     .map((o) => o.trim())
@@ -74,14 +81,18 @@ function assertEnv() {
   if (missing.length && config.isProduction) {
     throw new Error(
       `Missing required environment variables: ${missing.join(', ')}. ` +
-        'In a deployment these come from the host\'s environment, not from .env — ' +
-        '.env is gitignored and is never part of the build artifact. ' +
-        'On Azure App Service set them under Configuration > Application settings ' +
-        '(deploy/set-azure-appsettings.ps1 pushes them for you).'
+        'These normally come from config/defaults.js, which ships with the code ' +
+        'so a deployment needs no host configuration — check that the key is ' +
+        'present and non-empty there. A host environment variable or a local ' +
+        '.env overrides it.'
     );
   }
   if (config.isProduction && !process.env.AUTH_SECRET) {
-    throw new Error('AUTH_SECRET must be set in production, or every restart logs all users out');
+    throw new Error(
+      'AUTH_SECRET must be set in production, or every restart signs all users ' +
+        'out — it ships in config/defaults.js, so an empty value there is the ' +
+        'likely cause.'
+    );
   }
   if (missing.length) {
     // eslint-disable-next-line no-console

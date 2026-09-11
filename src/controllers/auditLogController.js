@@ -14,9 +14,16 @@ const { config } = require('../config/env');
  * pagination. There is no create/update/delete counterpart by design.
  */
 /** Build the query filter shared by the list and the export. */
-function buildFilter(query) {
+function buildFilter(query, cluster) {
   const { search, action, excludeAction, userId, indexId, startDate, endDate } = query;
   const filter = {};
+
+  // The audit trail is one central collection shared by every cluster, and
+  // each entry records the cluster it happened on. Without this line a
+  // session on one cluster read — and exported — every other cluster's
+  // change history: index names, collection names, usernames and full
+  // before/after values.
+  if (cluster && cluster.key) filter.cluster = cluster.key;
 
   const parseActions = (value) =>
     String(value || '')
@@ -26,17 +33,25 @@ function buildFilter(query) {
 
   if (action) {
     const actions = parseActions(action);
-    if (actions.length) filter.action = { $in: actions };
+    // An unrecognised action used to be dropped, which silently returned the
+    // WHOLE log to a caller who believed it was filtered. Say so instead.
+    if (!actions.length) throw ApiError.badRequest(`Unknown action filter: ${String(action)}`);
+    filter.action = { $in: actions };
   }
 
   // Excluding happens here rather than in the browser: filtering a page of
   // results client-side would leave the totals and page count wrong.
   if (excludeAction) {
     const excluded = parseActions(excludeAction);
-    if (excluded.length) filter.action = { ...(filter.action || {}), $nin: excluded };
+    if (!excluded.length) {
+      throw ApiError.badRequest(`Unknown excludeAction filter: ${String(excludeAction)}`);
+    }
+    filter.action = { ...(filter.action || {}), $nin: excluded };
   }
-  if (userId) filter.userId = userId;
-  if (indexId) filter.indexId = indexId;
+  // String(): Express' extended query parser turns ?userId[$regex]=... into an
+  // object, which went straight into the Mongo filter as an operator.
+  if (userId) filter.userId = String(userId);
+  if (indexId) filter.indexId = String(indexId);
 
   if (startDate || endDate) {
     filter.timestamp = {};
@@ -93,7 +108,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('format must be csv or json');
   }
 
-  const filter = buildFilter(req.query);
+  const filter = buildFilter(req.query, req.cluster);
   const stamp = new Date().toISOString().slice(0, 10);
 
   // Streamed with a cursor rather than loaded into an array: an audit log
@@ -235,7 +250,7 @@ const getAuditLogs = asyncHandler(async (req, res) => {
   const sortBy = allowedSort.includes(req.query.sortBy) ? req.query.sortBy : 'timestamp';
   const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
-  const filter = buildFilter(req.query);
+  const filter = buildFilter(req.query, req.cluster);
 
   const [items, total] = await Promise.all([
     AuditLog.find(filter)

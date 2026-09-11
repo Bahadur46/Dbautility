@@ -8,8 +8,8 @@ drops it, and every page shows whether the definition and the database actually 
 
 DBA Utility keeps its own records (index definitions, audit logs) in the database from the
 connection string, but **manages indexes on any database on the same server** — pick the database
-and collection from dropdowns. A Query Analyzer finds the queries that scan too much and turns the
-fix into a real index.
+and collection from dropdowns. An optimization dashboard reports what that work bought, per cluster
+and per date range.
 
 - **Frontend** — React 18 + Vite + React Router (separate app, `frontend/`)
 - **Backend** — Node.js + Express REST API (separate app, `backend/`)
@@ -71,8 +71,8 @@ dba-utility/
 │       ├── services/
 │       │   ├── auditService.js     The ONLY writer of audit entries
 │       │   ├── indexService.js     createIndex / dropIndex against any database
-│       │   ├── indexAdvisor.js     Pure ESR recommendation logic
-│       │   └── analyzerService.js  Profiler, explain and $indexStats, with degradation
+│       │   ├── dashboardService.js Optimization dashboard aggregations
+│       │   └── optimizationService.js  The ONLY writer of optimization activities
 │       ├── middleware/
 │       │   ├── userContext.js      Resolves req.user (swap point for real auth)
 │       │   ├── validate.js         Validator runner + ObjectId guard
@@ -125,24 +125,6 @@ All responses share one envelope:
 
 List query parameters: `page`, `limit`, `search`, `status`, `indexType`, `sortBy`, `sortOrder`.
 
-### Query Analyzer (read-only)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/analyzer/overview?database=` | Collection sizes and index coverage; flags unindexed collections |
-| `POST` | `/api/analyzer/analyze` | Analyse one query shape and recommend an index |
-| `GET` | `/api/analyzer/profiler?database=` | Whether the database profiler is available and on |
-| `PUT` | `/api/analyzer/profiler` | Turn slow-operation recording on or off |
-| `GET` | `/api/analyzer/slow-queries?database=` | Recorded slow operations, grouped, with recommendations |
-| `GET` | `/api/analyzer/index-usage?database=` | Which existing indexes are never used |
-| `DELETE` | `/api/analyzer/indexes` | Drop an unused index (**admin only**, recorded as `DROP`) |
-
-Creating a recommended index goes through `POST /api/manual-indexes`, so it is validated, applied
-and audited like any other index. The one write the analyzer performs itself is dropping an unused
-index, which is admin-only, requires confirmation, refuses `_id_`, refuses any index a Manual Index
-record owns (delete that from the Manual Indexes page instead, so the record stays in step), and is
-recorded as a `DROP` audit entry holding the key spec of what was removed.
-
 ### Audit Logs (read-only)
 
 | Method | Endpoint | Description |
@@ -159,6 +141,127 @@ recorded as a `DROP` audit entry holding the key spec of what was removed.
 List query parameters: `page`, `limit`, `search`, `action`, `userId`, `indexId`, `startDate`, `endDate`, `sortBy`, `sortOrder`.
 
 Every other `POST`, `PUT`, `PATCH` and `DELETE` on `/api/audit-logs/*` returns **403**.
+
+### Optimization Dashboard
+
+Served under `/api/dashboard/dba` — the paths the frontend already calls. Every read takes the same
+scope, so changing the date filter or the cluster in the UI is one parameter change applied
+uniformly rather than a different contract per panel:
+
+- `?from=` / `?to=` — ISO instants. **Either may be omitted**; "all time" has neither. They are
+  sent as instants rather than a preset name because the browser resolved them in the reader's
+  timezone, and a server recomputing "this week" from the word could disagree by a day.
+- `?cluster=<key>` — omitted or `all` means **every cluster**, which is the view the dashboard
+  opens on. `unassigned` selects entries belonging to no cluster.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/dashboard/dba/summary` | KPI totals, the same totals for the preceding period, and the performance panel |
+| `GET` | `/api/dashboard/dba/activities` | The recent-activity table; `?activityType=` is the drill-down a KPI card opens |
+| `POST` | `/api/dashboard/dba/activities` | Record a query rewrite or API optimisation (see below) |
+| `GET` | `/api/dashboard/dba/range-counts` | The count behind each date card, in one request |
+| `GET` | `/api/dashboard/dba/cluster-counts` | How much of the range sits on each cluster — the chip numbers |
+| `GET` | `/api/dashboard/dba/filters/options` | The databases, collections and statuses actually recorded |
+
+`summary` also takes `?previousFrom=` / `?previousTo=`; without them `previous` is null and the
+cards show no change rather than a made-up one. `range-counts` takes
+`?ranges=[{"key","from","to"}]` — one request rather than one per preset, so opening the dashboard
+does not fan out into five near-identical count queries. Activity parameters: `page`, `limit`,
+`activityType`, `database`, `collection`, `status`.
+
+#### All clusters at once
+
+This is the one part of the API that deliberately reaches past the cluster the session is pinned to,
+and the only place it *can* happen: a session token names exactly one cluster, so the browser cannot
+assemble a cross-cluster total without swapping tokens and thrashing the session. It is safe here
+because **sign-in is not cluster-wise** — one account signs in once for the whole deployment and
+then picks a cluster, so a user who can see the all-cluster total can already reach every one of
+those clusters by switching to it. The routes still carry the full
+`requireDatabase + requireAuth + requireCluster` guard.
+
+Every configured cluster appears in `cluster-counts` whether or not it has activity: a cluster
+missing from the chip strip reads as "not configured" rather than "quiet this week". An unknown
+`?cluster=` is a **400**, not a silently empty dashboard that looks like a quiet week.
+
+#### Where the numbers come from
+
+The dashboard reads `optimizationactivities`, a central collection beside the audit trail with the
+cluster recorded on each entry. It is separate from the audit log on purpose: the audit log is
+evidence of who changed which record and knows nothing about execution times, while a slow query
+rewritten in application code changes no record at all yet is exactly the work the dashboard exists
+to count.
+
+Two of the four activity types are recorded automatically, from the paths that perform them —
+`INDEX_CREATED` when a Manual Index is really applied to MongoDB (never for a `DRAFT`), and
+`INDEX_DROPPED` from all three drop paths: Manual Index delete, Manual Index drop, and a
+`dropIndex` typed into the Query Executor. Posting either type to
+`POST /api/dashboard/dba/activities` is rejected with **400**, because it would count the same
+change twice.
+
+The other two have no database event to catch, so they are reported by whoever did the work:
+
+```jsonc
+POST /api/dashboard/dba/activities
+{
+  "activityType": "LONG_QUERY",          // or API_OPTIMIZATION
+  "databaseName": "shop",
+  "collectionName": "orders",
+  "subject": "{ status: 1, createdAt: -1 }",
+  "before": { "executionTimeMs": 850, "documentsExamined": 120000, "planStage": "COLLSCAN" },
+  "after":  { "executionTimeMs": 120, "documentsExamined": 900, "indexUsed": "status_1_createdAt_-1" }
+}
+```
+
+`improvementPercent` (85.88 here) is derived from `before`/`after` on save and never accepted from
+the caller, so the headline can never disagree with the measurements printed beside it.
+
+#### Backfilling the history
+
+`optimizationactivities` is only written from the moment the recording hooks shipped, so a
+deployment with real history opens on a dashboard of zeros — the work happened, it simply was not
+counted. Every index created or dropped before that is in `auditlogs` and nowhere else:
+
+```bash
+npm run backfill:dashboard -- --dry-run   # report what it would write, change nothing
+npm run backfill:dashboard                # write it
+```
+
+Safe to run twice — each activity records the `auditLogId` it came from, and an audit entry that
+already has one is skipped. Nothing in `auditlogs` is modified; it is append-only and this only
+reads it. Rows it writes are tagged `notes: "Backfilled from the audit trail"`, so they can be
+identified or removed without touching anything recorded live.
+
+It deliberately skips **UPDATE** entries (an update that re-applies an index drops and recreates the
+same one, so counting it would double-count the original CREATE) and any CREATE or DELETE whose
+`mongoCommand` is empty — that emptiness is exactly the test for "did this ever touch MongoDB",
+so a DRAFT definition or a delete with no applied index behind it is correctly not counted.
+
+Backfilled rows carry **no before/after figures**: the audit trail holds field snapshots, not query
+plans, and never recorded execution times. The KPI cards, cluster chips and activity table become
+correct immediately; the performance panel stays blank until measured optimisations are recorded.
+Inventing a plausible "850ms → 120ms" for these rows was the alternative, and a fabricated
+improvement figure is worse than an honest blank.
+
+#### What the performance panel counts
+
+Only `APPLIED` work is averaged. A pending or failed optimisation has not changed how the database
+behaves, and averaging its intended "after" in would overstate the gain.
+
+Index drops are excluded from the **improvement** figure specifically. They trade read speed for
+write throughput and storage, so their "after" is legitimately slower — counting them as
+regressions would misread the intent. They still count towards the execution-time and
+documents-examined averages, which describe what the database is doing rather than whether it got
+faster.
+
+Every measurement field is optional and defaults to **null**, not 0 — an unmeasured optimisation
+must not report "0 ms" and drag every average towards zero. The aggregations skip nulls, and
+`queriesOptimized` says how many rows the averages actually rest on.
+
+`memoryImpactPct` and `cpuImpactPct` are **always null**: nothing measures them. The record holds
+execution time and documents examined, both taken from the query plan; memory residency and CPU are
+properties of the server over time, not of one optimisation, and MongoDB does not attribute either
+to the change that caused it. The panel renders null as "not measured" — a 0 there would read as
+"measured, and it made no difference", which is a different claim and an unfounded one.
 
 ### Index types
 
@@ -292,30 +395,6 @@ created outside DBA Utility are never touched.
 **Drift is visible, not assumed.** `GET /:id/db-status` compares the stored definition against the
 live database on every detail page. If someone drops an index in the shell, the page says so and the
 Sync button puts it back.
-
-## Finding what to index
-
-`services/indexAdvisor.js` is pure logic — given a filter and a sort, it returns the index that
-would serve them, ordered by the **ESR rule**: Equality fields first, then Sort fields, then Range
-fields. MongoDB reads a compound key left to right, so equality narrows the scan to a contiguous
-section, the sort is then satisfied by reading that section in order, and a range can only come last
-without breaking either.
-
-It also compares the recommendation against the indexes a collection already has, and accounts for
-the fact that MongoDB can walk an index **backwards** — an index with inverted sort directions is
-not redundant, so it is not re-recommended.
-
-`services/analyzerService.js` gathers the evidence from three independent sources, each optional:
-
-| Source | What it gives | Where it works |
-|---|---|---|
-| Database profiler | Real slow operations, grouped by query shape | Dedicated clusters (Atlas M10+); blocked on M0/M2/M5 |
-| `explain()` | How one query runs right now | Most deployments |
-| `$indexStats` | Which indexes are never used | Most deployments |
-
-Every capability is probed, and an unavailable one degrades to a plain explanation instead of an
-error — the parts that do work keep working. The **Analyze a query** tool needs none of them, so it
-works on every tier including Atlas free clusters.
 
 ## Which database indexes land on
 

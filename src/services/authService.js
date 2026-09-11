@@ -10,25 +10,21 @@ const loginRecords = require('./loginRecordService');
 /**
  * One sign-in for the whole deployment, and a cluster chosen afterwards.
  *
- * Each cluster keeps its accounts in its own database: Ananda's LoginTB is in
- * Ananda's database, Kamdhenu's in Kamdhenu's. The cluster named on the sign-in
- * form is therefore half the credential — it decides which LoginTB is read at
- * all — so the same username in two clusters is two separate accounts, and an
- * account in one cluster is invisible to every other.
+ * The accounts are central: one LoginTB, in the database MONGODB_URI names
+ * (dba_utility), which the deployment uses for login and nothing else. One
+ * username and one password therefore serve every cluster, and signing in is a
+ * single act — no cluster is named on the form and none is guessed at.
  *
- * The chosen cluster rides on the token as a signed claim, so it cannot be
- * tampered with, and decides which data (manual indexes, audit trail, the
- * analyzer) the session works on. selectCluster() can move a session to another
- * cluster without a second sign-in, but only to a cluster the account is
- * allowed to use — which, for a cluster-pinned account, is only its own. Until
- * a cluster is chosen the session can reach no data route at all;
- * `requireCluster` sees to that.
+ * The cluster is chosen straight afterwards, inside the app, through
+ * selectCluster(); the same call switches cluster later. The chosen cluster
+ * rides on the token as a signed claim, so it cannot be tampered with, and
+ * decides which data (manual indexes, the audit trail) the session works on. Only
+ * a cluster the account is allowed to use is accepted — for a cluster-pinned
+ * account, its own and no other. Until a cluster is chosen the session can
+ * reach no data route at all; `requireCluster` sees to that.
  *
- * A System Administrator is seeded into each cluster: same login name, same
- * password, one row in each cluster's own LoginTB. An account created
- * afterwards in the app may leave `cluster` blank, which means it is not
- * recorded against any one cluster — it still only exists in the database it
- * was created in.
+ * An account may leave `cluster` blank, which is the normal case: it means the
+ * account is pinned to no cluster and may work on any of them.
  *
  * Sessions are stateless signed tokens; logout works by remembering the token
  * id (`jti`) until its natural expiry, so a logged-out token stops being
@@ -169,13 +165,11 @@ async function login({ username, password, cluster: clusterKey }, req = null) {
       throw err;
     }
 
-    // No cluster named on the form: start the session on the first cluster the
-    // account may use, so a sign-in lands ready to work instead of on a token
-    // that every data route refuses. selectCluster() still switches it later.
-    if (!cluster && clusters.isEnabled()) {
-      const [first] = clustersFor(user);
-      if (first) cluster = resolveCluster(first.key);
-    }
+    // No cluster is picked for the user here — not even when only one is
+    // reachable. The session comes back with clusterRequired, the app shows the
+    // cluster option, and selectCluster() puts the session on the one chosen.
+    // Guessing would hide the choice and quietly land somebody on a cluster
+    // they did not ask for.
 
     user.lastLoginAt = new Date();
     await user.save();
@@ -308,9 +302,10 @@ async function resolveToken(token) {
   let cluster = null;
   if (clusters.isEnabled() && payload.cluster) {
     cluster = clusters.getCluster(payload.cluster);
-    // A token for a cluster that has since been removed or gone offline is no
-    // longer usable — its session has nowhere to be served from.
-    if (!cluster || !getConnection(cluster.key)) return null;
+    // A token for a cluster that has since been removed or gone offline still
+    // proves who the user is — only the cluster is gone. Fall back to a session
+    // with no cluster, so the app asks for one instead of signing the user out.
+    if (!cluster || !getConnection(cluster.key)) cluster = null;
   }
   // A token with no cluster is a signed-in session that has not chosen one yet.
   // It is a real identity, so it can read its own account and pick a cluster;

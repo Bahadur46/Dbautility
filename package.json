@@ -11,7 +11,8 @@
     "seed": "node src/scripts/seed.js",
     "create:user": "node src/scripts/createUser.js",
     "check:clusters": "node src/scripts/checkClusters.js",
-    "cleanup:accounts": "node src/scripts/cleanupCentralAccounts.js"
+    "cleanup:accounts": "node src/scripts/cleanupCentralAccounts.js",
+    "backfill:dashboard": "node src/scripts/backfillOptimizationActivities.js"
   },
   "dependencies": {
     "compression": "^1.7.4",

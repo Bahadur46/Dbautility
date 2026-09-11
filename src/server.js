@@ -96,10 +96,13 @@ async function start() {
  */
 async function initDatabase() {
   try {
+    // The login database first: MONGODB_URI (dba_utility) holds the one set of
+    // accounts and the sign-in history, so nobody can sign in until it is up.
+    await connectDB();
+
     if (clusters.isEnabled()) {
-      // Cluster-wise deployment: one connection per cluster, each with its own
-      // accounts and data. MONGODB_URI is still connected, so /api/health and
-      // anything not tied to a session keeps working.
+      // Cluster-wise deployment: one connection per cluster, holding that
+      // cluster's own data. The accounts are not there — they are central.
       const results = await connectAllClusters();
       const live = results.filter((r) => r.connected).map((r) => r.label);
       // eslint-disable-next-line no-console
@@ -109,8 +112,6 @@ async function initDatabase() {
         console.error('[db] No cluster could be reached — check the CLUSTER_* values');
       }
     }
-
-    await connectDB();
   } catch (err) {
     /* eslint-disable no-console */
     console.error(`[db] The database is unavailable: ${err.message}`);
