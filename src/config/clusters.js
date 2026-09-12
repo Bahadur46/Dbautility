@@ -33,9 +33,11 @@ require('./defaults');
  *   CLUSTER_<KEY>_TARGET_DB  the database indexes are applied to (optional,
  *                            defaults to TARGET_DB, then the URI's database)
  *
- * MONGODB_URI is used for login ONLY — no cluster is ever served from it. A
- * cluster connects over CLUSTER_<KEY>_URI, or CLUSTER_<KEY>_DATA_URI when that
- * is all it has; a cluster with neither is not offered at all.
+ * A cluster connects over CLUSTER_<KEY>_URI. With none configured it falls
+ * back to the server MONGODB_URI names — the deployment's own, which already
+ * holds the accounts — in its own database: `dba_<key>`, unless CLUSTER_<KEY>_DB
+ * says otherwise. CLUSTER_<KEY>_DATA_URI is never used for this: it reaches a
+ * customer's data server, which the application must leave untouched.
  */
 const DEFINITIONS = [
   { key: 'ananda', label: 'Ananda' },
@@ -95,9 +97,13 @@ const clusters = DEFINITIONS.map((def) => {
     dbName,
     // Aimed at `dbName`, so a URI that stops at the host still lands on a named
     // database rather than the driver's default.
-    // MONGODB_URI is the login database and is never borrowed: a cluster is
-    // reached over its own URI, else its data server, else not at all.
-    uri: withDatabase(ownUri || dataUri, dbName),
+    // A cluster is reached over its own URI when it has one. With none, its
+    // records go in `dbName` on the deployment's own server — the one
+    // MONGODB_URI names, where the accounts already are. The data server is
+    // NEVER used for this: the application writes nothing of its own there and
+    // its user is granted only the databases it reads and indexes, so
+    // borrowing it fails on the first insert with 'not authorized on dba_<key>'.
+    uri: withDatabase(ownUri || currentUri, dbName),
     shared: false,
     // The server the indexes are created on, when that is NOT the server the
     // cluster's own records live on. This is the case where the application
