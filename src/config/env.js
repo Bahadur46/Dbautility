@@ -67,7 +67,7 @@ const config = {
     // Signs session tokens. A random secret is fine in development — it only
     // means restarts invalidate old tokens — but must be set in production.
     secret: process.env.AUTH_SECRET || crypto.randomBytes(32).toString('hex'),
-    tokenTtlMs: parseInt(process.env.AUTH_TOKEN_TTL_MS, 10) || 8 * 60 * 60 * 1000,
+    tokenTtlMs: parseInt(process.env.AUTH_TOKEN_TTL_MS, 10) || 7 * 24 * 60 * 60 * 1000,
   },
 };
 

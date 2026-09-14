@@ -44,7 +44,10 @@ function predicateDocument(command) {
     if (first && leading && leading.$match) return leading.$match;
     return {};
   }
-  return command.filter || command.query || {};
+  // update/delete log their filter as `q`; a batched command carries it in its
+  // first statement.
+  const statement = (command.updates || command.deletes || [])[0];
+  return command.filter || command.query || command.q || (statement && statement.q) || {};
 }
 
 /** The sort a command asks for, if any. */
@@ -131,6 +134,40 @@ function parsePlanSummary(planSummary) {
   return { stage, indexFields: keys };
 }
 
+// Command names whose value is the collection they run on.
+const COLLECTION_COMMANDS = [
+  'find', 'aggregate', 'update', 'delete', 'insert', 'count', 'distinct',
+  'findAndModify', 'findandmodify', 'mapReduce', 'mapreduce', 'createIndexes', 'explain',
+];
+
+/**
+ * "db.collection" for an operation, from whichever field names it.
+ *
+ * `ns` is the usual answer, but a command's own `ns` can be "db.$cmd", a
+ * getMore names its collection under `collection`, an explain wraps the real
+ * command, and some sources give the database only as `$db` or `db`.
+ */
+function resolveNamespace(op, command) {
+  const given = String(pick(op, 'ns', 'namespace') || '').trim();
+  const fromGiven = splitNamespace(given);
+  const usable = given && fromGiven.collectionName && !fromGiven.collectionName.startsWith('$cmd');
+  if (usable) return given;
+
+  const inner = command.explain && typeof command.explain === 'object' ? command.explain : command;
+  let collection = '';
+  for (const name of COLLECTION_COMMANDS) {
+    const value = inner[name];
+    if (typeof value === 'string' && value) {
+      collection = value;
+      break;
+    }
+  }
+  if (!collection && typeof inner.collection === 'string') collection = inner.collection;
+
+  const database = inner.$db || command.$db || op.db || fromGiven.databaseName || '';
+  return collection ? `${database}.${collection}` : given;
+}
+
 /**
  * One operation document, read into the fields everything else here uses.
  *
@@ -138,13 +175,22 @@ function parsePlanSummary(planSummary) {
  * caller never has to remember which of `millis`, `durationMillis` and
  * `planningTimeMicros` a particular source happened to use.
  */
-function parseOp(op) {
+function parseOp(input) {
+  // A structured log line ({"t":…,"msg":"Slow query","attr":{…}}) keeps the
+  // operation itself under `attr`.
+  const op =
+    input && typeof input === 'object' && !input.ns && input.attr && typeof input.attr === 'object'
+      ? input.attr
+      : input;
   if (!op || typeof op !== 'object') {
     throw ApiError.badRequest('Provide the operation document as a JSON object');
   }
 
-  const command = op.command || op.originatingCommand || {};
-  const ns = pick(op, 'ns') || `${command.$db || ''}.${command.aggregate || command.find || ''}`;
+  const rawCommand = op.command || op.originatingCommand || {};
+  const ns = resolveNamespace(op, rawCommand);
+  // explain wraps the real command; the filter and sort are inside it.
+  const command =
+    rawCommand.explain && typeof rawCommand.explain === 'object' ? rawCommand.explain : rawCommand;
   const { databaseName, collectionName } = splitNamespace(ns);
 
   if (!collectionName) {
@@ -162,7 +208,7 @@ function parseOp(op) {
     databaseName,
     collectionName,
     namespace: ns,
-    operation: command.aggregate ? 'aggregate' : command.find ? 'find' : op.op || 'command',
+    operation: command.aggregate ? 'aggregate' : command.find ? 'find' : op.op || op.type || 'command',
     command,
     match,
     sort: sortDocument(command),
@@ -172,7 +218,7 @@ function parseOp(op) {
     planningMillis: Math.round(planningMicros / 1000),
     keysExamined: Number(pick(op, 'keysExamined') || 0),
     docsExamined: Number(pick(op, 'docsExamined') || 0),
-    nreturned: Number(pick(op, 'nreturned', 'nReturned') || 0),
+    nreturned: Number(pick(op, 'nreturned', 'nReturned', 'nMatched', 'ndeleted') || 0),
     bytesRead: Number(pick(op, 'storage.data.bytesRead') || 0),
     readMillis: Math.round(Number(pick(op, 'storage.data.timeReadingMicros') || 0) / 1000),
     cpuMillis: Math.round(Number(pick(op, 'cpuNanos') || 0) / 1e6),

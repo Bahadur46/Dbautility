@@ -635,6 +635,16 @@ const dropManualIndex = asyncHandler(async (req, res) => {
 const getCollections = asyncHandler(async (req, res) => {
   const databaseName = (req.query.database || '').trim() || undefined;
 
+  // A cluster whose indexes live on a separate data server has no default
+  // database. Until one is chosen there is simply nothing to list — not an error.
+  if (!databaseName && indexService.requiresExplicitDatabase()) {
+    return sendSuccess(res, {
+      message: 'Choose a database to list its collections',
+      data: [],
+      meta: { database: '', requiresDatabase: true },
+    });
+  }
+
   const names = await indexService.listCollections(databaseName);
 
   const data = await Promise.all(
@@ -664,6 +674,14 @@ const getFields = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('A collection is required to list its fields', [
       { field: 'collection', message: 'A collection is required to list its fields' },
     ]);
+  }
+
+  if (!databaseName && indexService.requiresExplicitDatabase()) {
+    return sendSuccess(res, {
+      message: 'Choose a database to list field names. You can still type a field name.',
+      data: { fields: [] },
+      meta: { database: '', collection: collectionName, requiresDatabase: true },
+    });
   }
 
   let fields = [];

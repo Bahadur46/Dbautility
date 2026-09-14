@@ -47,6 +47,9 @@ async function userContext(req, res, next) {
         };
         req.token = token;
         req.cluster = cluster;
+        // The cluster the token was issued for, even when its connection is not
+        // up — lets requireCluster tell "not chosen" from "not reachable yet".
+        req.tokenCluster = session.payload.cluster || null;
         // next() runs inside the cluster context, so every handler after this
         // point resolves models against that cluster's connection.
         return cluster ? runWithCluster(cluster.key, () => next()) : next();

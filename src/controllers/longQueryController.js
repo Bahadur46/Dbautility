@@ -349,18 +349,18 @@ const deleteOptimization = asyncHandler(async (req, res) => {
   const activity = await OptimizationActivity.findById(req.params.id);
   if (!activity) throw ApiError.notFound('That optimisation activity does not exist');
 
-  if (!DELETABLE.has(activity.activityType)) {
-    throw ApiError.badRequest(
-      `A ${activity.activityType} row was written by the server when the index actually changed, ` +
-        'so it is a record of something that happened rather than an entry to correct. It cannot be deleted here.'
-    );
-  }
+  // Index creates and drops may be removed too, on request from the All
+  // activities list. Only the dashboard row goes: the real index is untouched
+  // and the audit trail keeps its own copy of the change.
+  const isIndexRow = !DELETABLE.has(activity.activityType);
 
   const removed = dashboardService.toRow(activity);
   await OptimizationActivity.deleteOne({ _id: activity._id });
 
   return sendSuccess(res, {
-    message: `Removed "${removed.target}" from the board`,
+    message: isIndexRow
+      ? `Removed "${removed.target || removed.indexName || 'activity'}" from the dashboard — the index itself was not changed`
+      : `Removed "${removed.target}" from the board`,
     data: { _id: removed._id, target: removed.target },
   });
 });

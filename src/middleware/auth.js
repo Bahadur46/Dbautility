@@ -34,6 +34,15 @@ function requireAdmin(req, res, next) {
 function requireCluster(req, res, next) {
   if (!clusters.isEnabled()) return next();
   if (!req.cluster) {
+    // A valid sign-in whose chosen cluster is not reachable — its connection
+    // still coming up after a restart — is not an expired session. 401 would
+    // make the app sign the user out, so it is answered as 503. A session that
+    // has not chosen a cluster yet keeps the 401 below.
+    if (req.user && req.user.isAuthenticated && req.tokenCluster) {
+      return next(
+        new ApiError(503, 'The cluster is not available right now — try again in a moment, or choose a cluster')
+      );
+    }
     return next(
       new ApiError(401, 'Sign in and choose a cluster — every request is served from one cluster')
     );
