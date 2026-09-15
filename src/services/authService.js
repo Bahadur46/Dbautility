@@ -240,10 +240,10 @@ async function selectCluster(token, clusterKey, req = null) {
     throw err;
   }
 
-  // The session moves, so the token it was riding on stops being accepted and
-  // the history row it opened is closed.
-  revoked.set(previous.jti, previous.exp);
-  pruneRevoked();
+  // The session moves and the history row it opened is closed. The old token
+  // is NOT revoked: a request already in flight, or another open tab, would
+  // otherwise get a 401 and sign the user out. It still only reaches the
+  // cluster it names, and it expires on its own.
   await loginRecords.recordLogout(previous.jti, session.cluster);
 
   return runOnAuthDb(async () => {
