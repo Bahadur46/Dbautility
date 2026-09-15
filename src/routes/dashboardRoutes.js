@@ -29,6 +29,7 @@ router.route('/activities').get(controller.getActivities).post(controller.create
 // Long queries: diagnose one, put it on the board, close it once it is fixed.
 // `analyze` writes nothing, so it can be run against anything without leaving
 // a trail of half-finished work. Declared before /:id so neither swallows it.
+router.get('/long-queries/stats', longQuery.longQueryStats);
 router.post('/long-queries/analyze', longQuery.analyzeLongQuery);
 router.post('/long-queries/:id/resolve', longQuery.resolveLongQuery);
 router.post('/long-queries', longQuery.recordLongQuery);

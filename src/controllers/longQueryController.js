@@ -305,6 +305,41 @@ const resolveLongQuery = asyncHandler(async (req, res) => {
  * of work is finished without anyone timing it, and refusing to let the board
  * say so would only push people to invent a number.
  */
+/**
+ * GET /api/dashboard/dba/long-queries/stats
+ *
+ * Total, Indexed, Ignored and Pending for the Long Queries page, counted over
+ * every long query rather than the page on screen. Indexed is a query closed
+ * as fixed (APPLIED); Pending is anything still open (PENDING, IN_PROGRESS,
+ * TO_BE_TESTED). REVERTED and FAILED count toward the total only.
+ */
+const PENDING_STATUSES = ['PENDING', 'IN_PROGRESS', 'TO_BE_TESTED'];
+
+const longQueryStats = asyncHandler(async (req, res) => {
+  const type = String(req.query.activityType || 'LONG_QUERY').toUpperCase();
+  // Optional ?from= &to= &cluster=, so the Dashboard can count over its own
+  // window and cluster. With none, every long query is counted.
+  const { start, end } = dashboardService.parseBounds(req.query.from, req.query.to);
+  const match = dashboardService.baseFilter({
+    clusterKey: dashboardService.parseClusterKey(req.query.cluster),
+    start,
+    end,
+    activityType: type,
+  });
+  const rows = await OptimizationActivity.aggregate([
+    { $match: match },
+    { $group: { _id: '$status', count: { $sum: 1 } } },
+  ]);
+  const by = Object.fromEntries(rows.map((r) => [r._id, r.count]));
+  const data = {
+    total: rows.reduce((sum, r) => sum + r.count, 0),
+    indexed: by.APPLIED || 0,
+    ignored: by.IGNORED || 0,
+    pending: PENDING_STATUSES.reduce((sum, s) => sum + (by[s] || 0), 0),
+  };
+  return sendSuccess(res, { message: 'Long query counts', data });
+});
+
 const setStatus = asyncHandler(async (req, res) => {
   const next = String((req.body || {}).status || '').toUpperCase();
   if (!OptimizationActivity.STATUSES.includes(next)) {
@@ -367,6 +402,7 @@ const deleteOptimization = asyncHandler(async (req, res) => {
 
 module.exports = {
   deleteOptimization,
+  longQueryStats,
   setStatus,
   analyzeLongQuery,
   recordLongQuery,

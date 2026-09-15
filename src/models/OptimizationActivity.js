@@ -32,7 +32,7 @@ const ACTIVITY_TYPES = ['LONG_QUERY', 'INDEX_CREATED', 'INDEX_DROPPED', 'API_OPT
  * PENDING stays for the work recorded before this board existed, and for a long
  * query that is simply found and not yet picked up.
  */
-const STATUSES = ['APPLIED', 'PENDING', 'IN_PROGRESS', 'TO_BE_TESTED', 'REVERTED', 'FAILED'];
+const STATUSES = ['APPLIED', 'PENDING', 'IN_PROGRESS', 'TO_BE_TESTED', 'REVERTED', 'FAILED', 'IGNORED'];
 
 /**
  * A performance measurement, taken before or after the change.

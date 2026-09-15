@@ -127,7 +127,11 @@ function baseFilter({
   // object, which would otherwise reach Mongo as an operator.
   if (databaseName) filter.databaseName = String(databaseName);
   if (collectionName) filter.collectionName = String(collectionName);
-  if (status) filter.status = String(status).toUpperCase();
+  if (status) {
+    // A comma list ("PENDING,IN_PROGRESS,TO_BE_TESTED") selects any of them.
+    const list = String(status).toUpperCase().split(',').map((s) => s.trim()).filter(Boolean);
+    filter.status = list.length > 1 ? { $in: list } : list[0];
+  }
   // The index kind, as it was recorded on the activity — SINGLE, COMPOUND, TTL.
   if (indexType) filter['subjectDetail.indexType'] = String(indexType).toUpperCase();
 
