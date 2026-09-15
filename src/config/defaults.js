@@ -50,6 +50,7 @@ const DEFAULTS = {
   "CLUSTER_KAMDHENU_DATA_URI": "mongodb+srv://adminuser_db_user:NIM3lV6tj7X7ym8Jdet@ClusterKamdhenuNew.x3jsp4.mongodb.net/ERP_40019",
   "CLUSTER_COLSTON_DATA_URI": "mongodb+srv://colstonbathindia:Poptnfn2175det@colstoncluster.3ggrl.mongodb.net",
   "CLUSTER_DOTIN_DATA_URI": "mongodb+srv://DotinTestUser:pC1J1J8DKdzHPuJa@dotinclusternew.3sxaxn.mongodb.net/",
+   "CLUSTER_ANANDA_DATA_URI":"mongodb+srv://dbautilityUser:sJAKVQk6y0dcsQhc@anandaclusternew.guwwcm.mongodb.net/"
 };
 
 applyDefaults(DEFAULTS);
