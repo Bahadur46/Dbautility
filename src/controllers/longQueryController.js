@@ -308,12 +308,23 @@ const resolveLongQuery = asyncHandler(async (req, res) => {
 /**
  * GET /api/dashboard/dba/long-queries/stats
  *
- * Total, Indexed, Ignored and Pending for the Long Queries page, counted over
- * every long query rather than the page on screen. Indexed is a query closed
- * as fixed (APPLIED); Pending is anything still open (PENDING, IN_PROGRESS,
- * TO_BE_TESTED). REVERTED and FAILED count toward the total only.
+ * Total, Indexed/Done, Ignored and Pending for the Long Queries page, counted
+ * over every long query rather than the page on screen. Done is a query whose
+ * fix is written — applied (APPLIED) or waiting on testing (TO_BE_TESTED);
+ * Pending is anything still being worked on (PENDING, IN_PROGRESS). A status
+ * belongs to exactly one of the two lists, so the two tiles never count the
+ * same row twice. REVERTED and FAILED count toward the total only.
+ *
+ * The same endpoint serves the API Optimizations page with ?activityType=
+ * API_OPTIMIZATION, and that page shows the board itself rather than a
+ * fixed/open split: In progress, To be tested, Done. Those three come back as
+ * `inProgress`, `toBeTested` and `done`, one status each, so a row appears
+ * under exactly one heading — which is why `done` is APPLIED alone and not the
+ * wider `indexed` the Long Queries tile reads, where To be tested has no
+ * column of its own to sit in.
  */
-const PENDING_STATUSES = ['PENDING', 'IN_PROGRESS', 'TO_BE_TESTED'];
+const DONE_STATUSES = ['APPLIED', 'TO_BE_TESTED'];
+const PENDING_STATUSES = ['PENDING', 'IN_PROGRESS'];
 
 const longQueryStats = asyncHandler(async (req, res) => {
   const type = String(req.query.activityType || 'LONG_QUERY').toUpperCase();
@@ -333,11 +344,39 @@ const longQueryStats = asyncHandler(async (req, res) => {
   const by = Object.fromEntries(rows.map((r) => [r._id, r.count]));
   const data = {
     total: rows.reduce((sum, r) => sum + r.count, 0),
-    indexed: by.APPLIED || 0,
+    indexed: DONE_STATUSES.reduce((sum, s) => sum + (by[s] || 0), 0),
     ignored: by.IGNORED || 0,
     pending: PENDING_STATUSES.reduce((sum, s) => sum + (by[s] || 0), 0),
+    // The board, for the API Optimizations page. One status each — see above.
+    inProgress: by.IN_PROGRESS || 0,
+    toBeTested: by.TO_BE_TESTED || 0,
+    done: by.APPLIED || 0,
   };
-  return sendSuccess(res, { message: 'Long query counts', data });
+  return sendSuccess(res, {
+    message: type === 'API_OPTIMIZATION' ? 'API optimisation counts' : 'Long query counts',
+    data,
+  });
+});
+
+/**
+ * GET /api/dashboard/dba/optimizations/:id
+ *
+ * One row in full, for the list's View button.
+ *
+ * It returns the same `toRow` shape the table already renders rather than the
+ * raw document, so the detail view and the row behind it can never disagree
+ * about a number — and the fields the table has no column for (subjectDetail,
+ * the full before/after measurements, notes) come along, which is the whole
+ * reason for opening a row.
+ */
+const getOptimization = asyncHandler(async (req, res) => {
+  const activity = await OptimizationActivity.findById(req.params.id);
+  if (!activity) throw ApiError.notFound('That optimisation activity does not exist');
+
+  return sendSuccess(res, {
+    message: 'Optimisation activity',
+    data: dashboardService.toRow(activity),
+  });
 });
 
 const setStatus = asyncHandler(async (req, res) => {
@@ -357,7 +396,9 @@ const setStatus = asyncHandler(async (req, res) => {
   await activity.save();
 
   return sendSuccess(res, {
-    message: `Moved to ${next.toLowerCase().replace(/_/g, ' ')}`,
+    // The board's own word for the column, not the stored constant lowercased
+    // — otherwise the toast says "applied" about a move the button called Done.
+    message: `Moved to ${dashboardService.STATUS_LABELS[next] || next}`,
     data: dashboardService.toRow(activity),
   });
 });
@@ -402,6 +443,7 @@ const deleteOptimization = asyncHandler(async (req, res) => {
 
 module.exports = {
   deleteOptimization,
+  getOptimization,
   longQueryStats,
   setStatus,
   analyzeLongQuery,

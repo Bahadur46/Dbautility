@@ -386,6 +386,26 @@ async function splitByCluster(filter) {
 const INDEX_ACTIVITIES = new Set(['INDEX_CREATED', 'INDEX_DROPPED']);
 
 /**
+ * The stored status as a person reads it, for the list's Status column.
+ *
+ * The stored value stays the single source of truth — this is only its
+ * spelling, sent with the row so every screen says it the same way instead of
+ * each one keeping its own map, which is how "Applied" and "Done" end up on
+ * two pages for the same state. APPLIED is "Done" because that is what the
+ * board it sits on calls the end of the work; see the model for why it is one
+ * field and not two.
+ */
+const STATUS_LABELS = {
+  APPLIED: 'Done',
+  IN_PROGRESS: 'In progress',
+  TO_BE_TESTED: 'To be tested',
+  PENDING: 'Pending',
+  REVERTED: 'Reverted',
+  FAILED: 'Failed',
+  IGNORED: 'Ignored',
+};
+
+/**
  * One stored activity as the table renders it.
  *
  * The shape is flattened here rather than in the browser so the table, the
@@ -436,6 +456,7 @@ function toRow(doc) {
     // In the all-clusters view the row is ambiguous without it.
     cluster,
     status: doc.status,
+    statusLabel: STATUS_LABELS[doc.status] || doc.status,
   };
 }
 
@@ -596,6 +617,7 @@ module.exports = {
   UNASSIGNED,
   ACTIVITY_TYPES,
   METRIC_KEYS,
+  STATUS_LABELS,
   parseBounds,
   parseClusterKey,
   parseType,

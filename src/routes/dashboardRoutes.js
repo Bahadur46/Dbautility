@@ -44,6 +44,13 @@ router.post('/api-optimizations', longQuery.recordApiOptimization);
 // already in use; neither is a different operation.
 router.post('/optimizations/:id/resolve', longQuery.resolveLongQuery);
 
+// One row in full, for the list's View button. Both spellings reach the same
+// handler for the same reason resolve does: the question is the same whichever
+// kind of work the row records.
+router.get('/long-queries/:id', longQuery.getOptimization);
+router.get('/api-optimizations/:id', longQuery.getOptimization);
+router.get('/optimizations/:id', longQuery.getOptimization);
+
 // Where the work has got to, as opposed to what it bought. No measurement is
 // involved, so this is not the same operation as resolving.
 router.post('/optimizations/:id/status', longQuery.setStatus);
