@@ -100,6 +100,9 @@ function parseListQuery(query) {
  */
 const createManualIndex = asyncHandler(async (req, res) => {
   const payload = normalize(req.body);
+  // The long query this index is being made to fix, when it is one. Checked
+  // before anything is applied, so a bad id cannot leave a real index behind.
+  const longQueryId = await optimizationService.resolveLongQueryId(req.body.longQueryId);
 
   const existing = await ManualIndex.findOne({ indexName: equalsInsensitive(payload.indexName) });
   if (existing) {
@@ -163,6 +166,7 @@ const createManualIndex = asyncHandler(async (req, res) => {
       auditLog: createEntry,
       databaseName: index.databaseName || indexService.defaultDatabaseName(),
       notes: indexService.describeSpec(index),
+      longQueryId,
     });
   }
 

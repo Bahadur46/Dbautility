@@ -1,6 +1,8 @@
 'use strict';
 
 const dashboardService = require('../services/dashboardService');
+const slowQueryService = require('../services/slowQueryService');
+const indexHealthService = require('../services/indexHealthService');
 const optimizationService = require('../services/optimizationService');
 const OptimizationActivity = require('../models/OptimizationActivity');
 const asyncHandler = require('../utils/asyncHandler');
@@ -64,6 +66,7 @@ const getActivities = asyncHandler(async (req, res) => {
     status: req.query.status,
     indexType: req.query.indexType,
     search: req.query.search,
+    linked: req.query.linked,
     page: req.query.page,
     limit: req.query.limit,
   });
@@ -202,7 +205,78 @@ const getFilterOptions = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * GET /api/dashboard/dba/slow-queries
+ * Profiler entries grouped by query shape, read-only. See slowQueryService.
+ */
+const getSlowQueries = asyncHandler(async (req, res) => {
+  const result = await slowQueryService.getSlowQueries({
+    ...scopeOf(req),
+    minMs: req.query.minMs,
+    search: req.query.search,
+    tracked: req.query.tracked,
+    database: req.query.database,
+    page: req.query.page,
+    limit: req.query.limit,
+  });
+  // Written directly: sendSuccess carries only data and meta, and the panel
+  // needs the summary and the per-database sources beside them.
+  return res.status(200).json({
+    success: true,
+    message: `${result.meta.total} slow query ${result.meta.total === 1 ? 'shape' : 'shapes'} found`,
+    data: result.data,
+    meta: result.meta,
+    summary: result.summary,
+    sources: result.sources,
+  });
+});
+
+/**
+ * GET /api/dashboard/dba/profiler/status
+ * Each database's profiler level and system.profile state. Read-only.
+ */
+const getProfilerStatus = asyncHandler(async (req, res) => {
+  const { data, summary } = await slowQueryService.getProfilerStatus({
+    clusterKey: dashboardService.parseClusterKey(req.query.cluster),
+    search: req.query.search,
+  });
+  return res.status(200).json({
+    success: true,
+    message: `${summary.on} of ${summary.databases} databases are profiling`,
+    data,
+    summary,
+  });
+});
+
+/**
+ * GET /api/dashboard/dba/index-health?cluster&database&search&minDays
+ * Unused and redundant indexes, and the heaviest collections. Read-only.
+ */
+const getIndexHealth = asyncHandler(async (req, res) => {
+  const { data, summary, sources, scan } = await indexHealthService.getIndexHealth({
+    clusterKey: dashboardService.parseClusterKey(req.query.cluster),
+    database: req.query.database,
+    search: req.query.search,
+    minDays: req.query.minDays,
+    refresh: req.query.refresh,
+  });
+  return res.status(200).json({
+    success: true,
+    message:
+      scan.status === 'running'
+        ? 'Reading index statistics — this takes a few minutes on a large cluster'
+        : `${summary.unusedCount} unused and ${summary.redundantCount} redundant indexes found`,
+    data,
+    summary,
+    sources,
+    scan,
+  });
+});
+
 module.exports = {
+  getIndexHealth,
+  getProfilerStatus,
+  getSlowQueries,
   getSummary,
   getActivities,
   getRangeCounts,

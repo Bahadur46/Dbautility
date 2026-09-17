@@ -111,6 +111,21 @@ const optimizationActivitySchema = new mongoose.Schema(
     auditLogId: { type: mongoose.Schema.Types.ObjectId, default: null },
     manualIndexId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
+    /**
+     * The LONG_QUERY task an INDEX_CREATED row was made to fix.
+     *
+     * One slow query can need two indexes, and without this link the dashboard
+     * would count that one fix three times — once as a long query, twice as
+     * index work. A linked index is still counted as an index created, but it
+     * belongs to its task and adds nothing to the number of tasks done. Null for
+     * an index created on its own, which stays a task in itself.
+     */
+    longQueryId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+
+    // How that link was made, so an inferred one can be checked and corrected:
+    // { method: 'manual' | 'exact' | 'fields' | 'time', score }. See indexLinkService.
+    longQueryLink: { type: mongoose.Schema.Types.Mixed, default: null },
+
     notes: { type: String, trim: true, maxlength: 1000, default: '' },
 
     timestamp: { type: Date, required: true, default: Date.now, index: true },

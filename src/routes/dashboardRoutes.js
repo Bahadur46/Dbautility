@@ -20,6 +20,12 @@ router.get('/summary', controller.getSummary);
 router.get('/range-counts', controller.getRangeCounts);
 router.get('/cluster-counts', controller.getClusterCounts);
 router.get('/filters/options', controller.getFilterOptions);
+// Read-only: grouped system.profile entries across the clusters in scope.
+router.get('/slow-queries', controller.getSlowQueries);
+// Read-only: each database's profiler level. Changing it is not done from here.
+router.get('/profiler/status', controller.getProfilerStatus);
+// Read-only: unused and redundant indexes and heavy collections on one cluster.
+router.get('/index-health', controller.getIndexHealth);
 
 // The table, the drill-down a KPI card opens (?activityType=), and the write
 // that records the optimisations the server cannot observe for itself — query
@@ -54,6 +60,9 @@ router.get('/optimizations/:id', longQuery.getOptimization);
 // Where the work has got to, as opposed to what it bought. No measurement is
 // involved, so this is not the same operation as resolving.
 router.post('/optimizations/:id/status', longQuery.setStatus);
+// Link the indexes that fixed a long query, without re-resolving it.
+router.post('/optimizations/:id/indexes', longQuery.linkIndexes);
+router.get('/optimizations/:id/index-candidates', longQuery.indexCandidates);
 
 // Correcting the board. Only the hand-entered kinds can be removed — see the
 // controller for why an index row cannot.

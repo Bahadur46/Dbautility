@@ -4,6 +4,7 @@ const longQueryService = require('../services/longQueryService');
 const optimizationService = require('../services/optimizationService');
 const dashboardService = require('../services/dashboardService');
 const OptimizationActivity = require('../models/OptimizationActivity');
+const { activeCluster } = require('../config/clusterConnections');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
 const { sendSuccess } = require('../utils/apiResponse');
@@ -73,6 +74,25 @@ const recordLongQuery = asyncHandler(async (req, res) => {
     throw ApiError.badRequest(`status must be one of: ${OptimizationActivity.STATUSES.join(', ')}`);
   }
 
+  // The same query shape already on the board is the same task. Recording it
+  // again — easy from the slow query panel — would count it twice.
+  if (type === 'LONG_QUERY' && analysis.queryHash) {
+    const cluster = activeCluster();
+    const existing = await OptimizationActivity.findOne({
+      activityType: 'LONG_QUERY',
+      status: { $ne: 'IGNORED' },
+      cluster: cluster ? cluster.key : '',
+      'subjectDetail.queryHash': analysis.queryHash,
+    }).sort({ timestamp: -1 });
+    if (existing) {
+      return sendSuccess(res, {
+        statusCode: 200,
+        message: 'This query is already on the board',
+        data: { activity: dashboardService.toRow(existing), analysis, duplicate: true },
+      });
+    }
+  }
+
   const activity = await optimizationService.record({
     activityType: type,
     databaseName: analysis.databaseName,
@@ -83,6 +103,8 @@ const recordLongQuery = asyncHandler(async (req, res) => {
     subjectDetail: {
       queryHash: analysis.queryHash,
       match: longQueryService.parseOp(op).match,
+      // Kept so an index built later can be matched to this query by its fields.
+      sort: longQueryService.parseOp(op).sort,
       plan: analysis.plan,
       recommendedIndex: analysis.recommendedIndex,
       findings: analysis.findings,
@@ -97,13 +119,18 @@ const recordLongQuery = asyncHandler(async (req, res) => {
     throw new ApiError(500, 'The long query could not be recorded — see the server log');
   }
 
+  // Indexes already built on this collection for this query belong to it, so
+  // the dashboard counts the query once rather than once plus each index.
+  const indexCount =
+    type === 'LONG_QUERY' ? await optimizationService.autoLinkLongQuery(activity) : 0;
+
   return sendSuccess(res, {
     statusCode: 201,
     message:
       status === 'PENDING'
         ? 'Long query recorded. Resolve it once the fix is in place to record the improvement.'
         : 'Long query recorded',
-    data: { activity: dashboardService.toRow(activity), analysis },
+    data: { activity: { ...dashboardService.toRow(activity), indexCount }, analysis },
   });
 });
 
@@ -284,7 +311,35 @@ const resolveLongQuery = asyncHandler(async (req, res) => {
   // measurements printed beside it.
   await activity.save();
 
-  const row = dashboardService.toRow(activity);
+  // The indexes that fixed it. Linking them is what keeps the dashboard from
+  // counting one fixed query as three pieces of work when it took two indexes.
+  let indexCount = 0;
+  if (activity.activityType === 'LONG_QUERY') {
+    const manualIndexIds = body.manualIndexIds || [];
+    const activityIds = body.indexActivityIds || [];
+    // The plan after the fix names the index it used; an index of that name on
+    // the same collection, not yet claimed by another task, is linked too, so
+    // the common case needs nothing from the caller.
+    if (after.indexUsed) {
+      const used = await OptimizationActivity.find({
+        activityType: 'INDEX_CREATED',
+        cluster: activity.cluster,
+        databaseName: activity.databaseName,
+        collectionName: activity.collectionName,
+        subject: after.indexUsed,
+        longQueryId: null,
+      }).select('_id');
+      activityIds.push(...used.map((d) => String(d._id)));
+    }
+    await optimizationService.linkIndexesToLongQuery(activity._id, {
+      activityIds,
+      manualIndexIds,
+    });
+    // Plus any index on the same collection nobody named.
+    indexCount = await optimizationService.autoLinkLongQuery(activity);
+  }
+
+  const row = { ...dashboardService.toRow(activity), indexCount };
   return sendSuccess(res, {
     message:
       row.improvementPct === null
@@ -342,11 +397,43 @@ const longQueryStats = asyncHandler(async (req, res) => {
     { $group: { _id: '$status', count: { $sum: 1 } } },
   ]);
   const by = Object.fromEntries(rows.map((r) => [r._id, r.count]));
+
+  // Indexes linked to these queries, split by where each query stands. A query
+  // counts once however many indexes it took, and only a done one is "fixed":
+  // an ignored or still-open query with a linked index was not fixed by it.
+  const tasks = await OptimizationActivity.find(match).select('_id status').lean();
+  const statusOf = new Map(tasks.map((t) => [String(t._id), t.status]));
+  const perQuery = await OptimizationActivity.aggregate([
+    { $match: { activityType: 'INDEX_CREATED', longQueryId: { $in: tasks.map((t) => t._id) } } },
+    { $group: { _id: '$longQueryId', indexes: { $sum: 1 } } },
+  ]);
+  const bucket = () => ({ queries: 0, indexes: 0 });
+  const withIndex = { done: bucket(), open: bucket(), ignored: bucket(), maxIndexesPerQuery: 0 };
+  for (const row of perQuery) {
+    const status = statusOf.get(String(row._id));
+    const key = DONE_STATUSES.includes(status)
+      ? 'done'
+      : PENDING_STATUSES.includes(status)
+        ? 'open'
+        : status === 'IGNORED'
+          ? 'ignored'
+          : null; // REVERTED / FAILED: in the max only.
+    if (key) {
+      withIndex[key].queries += 1;
+      withIndex[key].indexes += row.indexes;
+    }
+    withIndex.maxIndexesPerQuery = Math.max(withIndex.maxIndexesPerQuery, row.indexes);
+  }
+
   const data = {
     total: rows.reduce((sum, r) => sum + r.count, 0),
     indexed: DONE_STATUSES.reduce((sum, s) => sum + (by[s] || 0), 0),
     ignored: by.IGNORED || 0,
     pending: PENDING_STATUSES.reduce((sum, s) => sum + (by[s] || 0), 0),
+    // Done queries only, kept for existing callers; withIndex has the full split.
+    resolvedWithIndex: withIndex.done.queries,
+    indexesCreated: withIndex.done.indexes,
+    withIndex,
     // The board, for the API Optimizations page. One status each — see above.
     inProgress: by.IN_PROGRESS || 0,
     toBeTested: by.TO_BE_TESTED || 0,
@@ -395,6 +482,16 @@ const setStatus = asyncHandler(async (req, res) => {
   if (req.body.notes !== undefined) activity.notes = String(req.body.notes).slice(0, 1000);
   await activity.save();
 
+  // An ignored query was not fixed, so the indexes linked to it were not its
+  // fix: they are released and count as other indexes. Reopening the query
+  // does not claim them back — relinking is a deliberate act.
+  if (activity.activityType === 'LONG_QUERY' && next === 'IGNORED') {
+    await OptimizationActivity.updateMany(
+      { activityType: 'INDEX_CREATED', longQueryId: activity._id },
+      { $set: { longQueryId: null, longQueryLink: null } }
+    );
+  }
+
   return sendSuccess(res, {
     // The board's own word for the column, not the stored constant lowercased
     // — otherwise the toast says "applied" about a move the button called Done.
@@ -432,6 +529,10 @@ const deleteOptimization = asyncHandler(async (req, res) => {
 
   const removed = dashboardService.toRow(activity);
   await OptimizationActivity.deleteOne({ _id: activity._id });
+  // Its indexes still exist; without their task they count as work of their own.
+  if (activity.activityType === 'LONG_QUERY') {
+    await OptimizationActivity.updateMany({ longQueryId: activity._id }, { $set: { longQueryId: null, longQueryLink: null } });
+  }
 
   return sendSuccess(res, {
     message: isIndexRow
@@ -441,7 +542,54 @@ const deleteOptimization = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * POST /api/dashboard/dba/optimizations/:id/indexes
+ *
+ * Link created indexes to a long query without resolving it again.
+ *
+ * For queries closed before linking existed, or closed without naming every
+ * index the fix took. Re-resolving would overwrite the recorded "after"
+ * measurement, so this touches nothing but the index rows' `longQueryId`.
+ */
+const linkIndexes = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const activity = await OptimizationActivity.findById(req.params.id).select('activityType');
+  if (!activity) throw ApiError.notFound('That optimisation activity does not exist');
+  if (activity.activityType !== 'LONG_QUERY') {
+    throw ApiError.badRequest('Indexes can only be linked to a long query');
+  }
+
+  // The ticked list is the whole answer: anything unticked is released.
+  const indexCount = await optimizationService.setLinkedIndexes(
+    activity._id,
+    body.indexActivityIds || [],
+    { move: body.move === true }
+  );
+
+  return sendSuccess(res, {
+    message: `${indexCount} ${indexCount === 1 ? 'index' : 'indexes'} linked`,
+    data: { _id: String(activity._id), indexCount },
+  });
+});
+
+/**
+ * GET /api/dashboard/dba/optimizations/:id/index-candidates
+ *
+ * The indexes that could be linked to a long query, suggested ones first.
+ */
+const indexCandidates = asyncHandler(async (req, res) => {
+  const activity = await OptimizationActivity.findById(req.params.id).lean();
+  if (!activity) throw ApiError.notFound('That optimisation activity does not exist');
+  if (activity.activityType !== 'LONG_QUERY') {
+    throw ApiError.badRequest('Indexes can only be linked to a long query');
+  }
+  const data = await dashboardService.getIndexCandidates(activity);
+  return sendSuccess(res, { message: `${data.length} candidate indexes`, data });
+});
+
 module.exports = {
+  linkIndexes,
+  indexCandidates,
   deleteOptimization,
   getOptimization,
   longQueryStats,

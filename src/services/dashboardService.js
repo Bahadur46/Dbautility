@@ -3,6 +3,7 @@
 const OptimizationActivity = require('../models/OptimizationActivity');
 const clusters = require('../config/clusters');
 const ApiError = require('../utils/ApiError');
+const indexLinkService = require('./indexLinkService');
 
 /**
  * Everything the DBA Optimization Dashboard reads.
@@ -154,19 +155,65 @@ function baseFilter({
   return filter;
 }
 
+/**
+ * Tasks versus indexes.
+ *
+ * Fixing one long query can take two indexes. Counted row by row that one fix
+ * is three pieces of work — 8 queries fixed with 16 indexes would show "24".
+ * So an INDEX_CREATED row linked to a long query (`longQueryId`) is part of
+ * that task: it still counts under `indexCreated`, which answers "how many
+ * indexes did we build", but not under `all`, which answers "how many tasks
+ * did we do". An index created on its own is a task in itself and counts in
+ * both.
+ */
+const IS_LINKED_INDEX = {
+  $and: [
+    { $eq: ['$activityType', 'INDEX_CREATED'] },
+    { $ne: [{ $ifNull: ['$longQueryId', null] }, null] },
+  ],
+};
+
+// The same test as a query filter, for countDocuments. `$ne: null` also
+// excludes a missing field, which is what an unlinked row looks like.
+const TASKS_ONLY = { $nor: [{ activityType: 'INDEX_CREATED', longQueryId: { $ne: null } }] };
+
+/** Narrow a filter to task rows, leaving any $or/$nor it already has intact. */
+const tasksOnly = (filter) => ({ $and: [filter, TASKS_ONLY] });
+
+function blankTotals() {
+  const out = { all: 0 };
+  for (const type of ACTIVITY_TYPES) out[METRIC_KEYS[type]] = 0;
+  // indexCreated split by whether a long query claimed the index.
+  out.indexCreatedForLongQueries = 0;
+  out.indexCreatedStandalone = 0;
+  return out;
+}
+
+/** Add one grouped row into a totals object. */
+function addToTotals(totals, activityType, linked, count) {
+  const metric = METRIC_KEYS[activityType];
+  if (metric) totals[metric] += count;
+  if (activityType === 'INDEX_CREATED') {
+    if (linked) totals.indexCreatedForLongQueries += count;
+    else totals.indexCreatedStandalone += count;
+  }
+  if (!linked) totals.all += count;
+}
+
 /** Counts per activity type under the frontend's metric names, zeros included. */
 async function totalsFor(filter) {
   const rows = await OptimizationActivity.aggregate([
     { $match: filter },
-    { $group: { _id: '$activityType', count: { $sum: 1 } } },
+    {
+      $group: {
+        _id: { activityType: '$activityType', linked: IS_LINKED_INDEX },
+        count: { $sum: 1 },
+      },
+    },
   ]);
 
-  const totals = { all: 0 };
-  for (const type of ACTIVITY_TYPES) totals[METRIC_KEYS[type]] = 0;
-  for (const row of rows) {
-    if (METRIC_KEYS[row._id]) totals[METRIC_KEYS[row._id]] = row.count;
-    totals.all += row.count;
-  }
+  const totals = blankTotals();
+  for (const row of rows) addToTotals(totals, row._id.activityType, row._id.linked, row.count);
   return totals;
 }
 
@@ -204,9 +251,14 @@ const MEASURED_IMPROVEMENT = {
  * slower — counting them as regressions would misread the intent. They still
  * count towards the execution-time and documents-examined averages, which
  * describe what the database is doing rather than whether it got faster.
+ *
+ * The panel is per task, like the `all` card. An index built for a long query
+ * is left out entirely: its effect is the long query's before/after, already
+ * on that row. Kept in, it would count as a second optimised query and inflate
+ * `appliedCount`, which is the denominator of `indexUsagePct`.
  */
 async function performanceFor(filter) {
-  const applied = { ...filter, status: 'APPLIED' };
+  const applied = tasksOnly({ ...filter, status: 'APPLIED' });
 
   const [row] = await OptimizationActivity.aggregate([
     { $match: applied },
@@ -220,6 +272,7 @@ async function performanceFor(filter) {
         avgExecMsAfter: { $avg: '$after.executionTimeMs' },
         docsExaminedBefore: { $avg: '$before.documentsExamined' },
         docsExaminedAfter: { $avg: '$after.documentsExamined' },
+        // Linked indexes are already excluded by the $match, so this is tasks.
         queriesOptimized: {
           $sum: { $cond: [{ $ne: ['$activityType', 'INDEX_DROPPED'] }, 1, 0] },
         },
@@ -340,17 +393,11 @@ async function splitByCluster(filter) {
     { $match: filter },
     {
       $group: {
-        _id: { cluster: '$cluster', activityType: '$activityType' },
+        _id: { cluster: '$cluster', activityType: '$activityType', linked: IS_LINKED_INDEX },
         count: { $sum: 1 },
       },
     },
   ]);
-
-  const blankTotals = () => {
-    const out = { all: 0 };
-    for (const type of ACTIVITY_TYPES) out[METRIC_KEYS[type]] = 0;
-    return out;
-  };
 
   // Every defined cluster gets an entry — configured or not, with activity or
   // not — so a caller can render the full roster without its own copy of it.
@@ -373,10 +420,7 @@ async function splitByCluster(filter) {
       });
     }
 
-    const entry = byCluster.get(bucket);
-    const metric = METRIC_KEYS[row._id.activityType];
-    entry.totals.all += row.count;
-    if (metric) entry.totals[metric] += row.count;
+    addToTotals(byCluster.get(bucket).totals, row._id.activityType, row._id.linked, row.count);
   }
 
   return [...byCluster.values()];
@@ -452,12 +496,124 @@ function toRow(doc) {
     // here manages, and for the two categories that touch no index at all —
     // the row still lists, it just has nowhere to go.
     manualIndexId: doc.manualIndexId ? String(doc.manualIndexId) : null,
+    // The long query an index was built for, so the table can show it under
+    // its task rather than as separate work. Null for a standalone index.
+    longQueryId: doc.longQueryId ? String(doc.longQueryId) : null,
+    linkMethod: (doc.longQueryLink && doc.longQueryLink.method) || null,
     notes: doc.notes || '',
     // In the all-clusters view the row is ambiguous without it.
     cluster,
     status: doc.status,
     statusLabel: STATUS_LABELS[doc.status] || doc.status,
   };
+}
+
+/** An INDEX_CREATED row as a task lists it: enough to name it and open it. */
+function toIndexRef(doc) {
+  const detail = doc.subjectDetail || {};
+  return {
+    _id: String(doc._id),
+    indexName: doc.subject,
+    indexType: detail.indexType || '',
+    keys: Array.isArray(detail.keys) ? detail.keys : [],
+    manualIndexId: doc.manualIndexId ? String(doc.manualIndexId) : null,
+    longQueryId: doc.longQueryId ? String(doc.longQueryId) : null,
+    createdBy: doc.userName || '',
+    createdAt: doc.timestamp ? new Date(doc.timestamp).toISOString() : null,
+  };
+}
+
+/**
+ * GET /dashboard/dba/optimizations/:id/index-candidates
+ *
+ * The indexes that could belong to one long query, best first. Only indexes on
+ * the query's own cluster, database and collection qualify, and one another
+ * task already owns is left out — an index belongs to one task.
+ *
+ * Each carries the same score the automatic linking uses (indexLinkService), so
+ * what the dialog suggests and what the server would link agree:
+ *   match.method  exact — the recommended keys; fields — its leading field and
+ *                 most of its keys are ones the query uses; time — no fields
+ *                 to compare, only query on the collection nearby
+ *   match.score   100 / 50–90 / 10, or match null when it does not fit
+ */
+async function getIndexCandidates(longQuery) {
+  const docs = await OptimizationActivity.find({
+    activityType: 'INDEX_CREATED',
+    cluster: longQuery.cluster || '',
+    databaseName: longQuery.databaseName || '',
+    collectionName: longQuery.collectionName,
+  })
+    .sort({ timestamp: -1 })
+    .limit(200)
+    .lean();
+  const dropped = await indexLinkService.droppedIndexIds(docs);
+  const mine = (doc) => Boolean(doc.longQueryId) && String(doc.longQueryId) === String(longQuery._id);
+
+  // The queries holding the other linked indexes, for "linked to …" in the list.
+  const otherIds = [...new Set(docs.filter((d) => d.longQueryId && !mine(d)).map((d) => String(d.longQueryId)))];
+  const holders = new Map(
+    (otherIds.length
+      ? await OptimizationActivity.find({ _id: { $in: otherIds } }).select('subject status').lean()
+      : []
+    ).map((q) => [String(q._id), { _id: String(q._id), subject: q.subject, status: q.status }])
+  );
+
+  const rank = { exact: 0, fields: 1, time: 2, manual: 3 };
+  const out = [];
+  for (const doc of docs) {
+    // A dropped index is nobody's fix any more and is left out — unless it is
+    // still linked here, where it is shown flagged so it can be unticked.
+    const isDropped = dropped.has(String(doc._id));
+    if (isDropped && !mine(doc)) continue;
+
+    let suggested = null;
+    let score = null;
+    if (mine(doc)) {
+      suggested = (doc.longQueryLink && doc.longQueryLink.method) || 'manual';
+      score = doc.longQueryLink ? doc.longQueryLink.score ?? null : null;
+    } else {
+      // How well it fits THIS query, whoever holds it now: an index held by
+      // another query is exactly the case where the right fix went missing.
+      const match = indexLinkService.scoreMatch(doc, longQuery);
+      // Suggested only when it fits here better than where it sits: an index
+      // that is another query's exact fix is still listed, but not proposed.
+      const heldScore = doc.longQueryId ? (doc.longQueryLink && doc.longQueryLink.score) ?? Infinity : -1;
+      if (match && match.score > heldScore) {
+        suggested = match.method;
+        score = match.score;
+      }
+    }
+    out.push({
+      ...toIndexRef(doc),
+      linked: mine(doc),
+      // Set when another query holds it; ticking it then needs move: true.
+      linkedTo: doc.longQueryId && !mine(doc) ? holders.get(String(doc.longQueryId)) || null : null,
+      dropped: isDropped,
+      suggested,
+      score,
+    });
+  }
+
+  return out.sort((x, y) => {
+    if (x.linked !== y.linked) return x.linked ? -1 : 1;
+    const rx = x.suggested in rank ? rank[x.suggested] : 9;
+    const ry = y.suggested in rank ? rank[y.suggested] : 9;
+    return rx - ry || (y.score || 0) - (x.score || 0) || Boolean(x.linkedTo) - Boolean(y.linkedTo);
+  });
+}
+
+/**
+ * ?linked= for the Index Created list: true is the indexes built for a long
+ * query, false the ones made on their own, absent both. Anything else is a 400
+ * rather than silently showing every index under a filter that reads as applied.
+ */
+function parseLinked(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value).trim().toLowerCase();
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  throw ApiError.badRequest('linked must be true or false');
 }
 
 /** GET /dashboard/dba/activities — the recent-activity table. */
@@ -471,20 +627,37 @@ async function getActivities({
   status,
   indexType,
   search,
+  linked,
   page = 1,
   limit = 10,
 }) {
-  const filter = baseFilter({
+  const linkedOnly = parseLinked(linked);
+  let type = parseType(activityType);
+  // Linking is a property of created indexes only, so the filter implies the type.
+  if (linkedOnly !== null) {
+    if (type && type !== 'INDEX_CREATED') {
+      throw ApiError.badRequest('linked applies only to activityType=INDEX_CREATED');
+    }
+    type = 'INDEX_CREATED';
+  }
+  const scoped = baseFilter({
     clusterKey,
     start,
     end,
-    activityType: parseType(activityType),
+    activityType: type,
     databaseName,
     collectionName,
     status,
     indexType,
     search,
   });
+  // The unfiltered list is a list of tasks, matching the All card: an index made
+  // for a long query is counted with that query, not as a row of its own. The
+  // Index Created list still shows every index.
+  const filter = type ? scoped : tasksOnly(scoped);
+  // Before countDocuments, so meta.total and the page count describe this split.
+  if (linkedOnly === true) filter.longQueryId = { $ne: null };
+  if (linkedOnly === false) filter.longQueryId = null;
 
   const safeLimit = Math.min(200, Math.max(1, Number(limit) || 10));
   const requested = Math.max(1, Number(page) || 1);
@@ -501,8 +674,34 @@ async function getActivities({
     .skip((current - 1) * safeLimit)
     .limit(safeLimit);
 
+  // The indexes each long query on this page took, in one query — so a task
+  // row can list its fixes rather than only count them.
+  const taskIds = docs.filter((d) => d.activityType === 'LONG_QUERY').map((d) => d._id);
+  const indexesByTask = new Map();
+  if (taskIds.length) {
+    const linked = await OptimizationActivity.find({
+      activityType: 'INDEX_CREATED',
+      longQueryId: { $in: taskIds },
+    })
+      .sort({ timestamp: 1 })
+      .select('subject subjectDetail manualIndexId longQueryId timestamp userName')
+      .lean();
+    for (const ix of linked) {
+      const key = String(ix.longQueryId);
+      if (!indexesByTask.has(key)) indexesByTask.set(key, []);
+      indexesByTask.get(key).push(toIndexRef(ix));
+    }
+  }
+
   return {
-    data: docs.map(toRow),
+    data: docs.map((doc) => {
+      const row = toRow(doc);
+      if (doc.activityType === 'LONG_QUERY') {
+        row.indexes = indexesByTask.get(row._id) || [];
+        row.indexCount = row.indexes.length;
+      }
+      return row;
+    }),
     meta: {
       page: current,
       limit: safeLimit,
@@ -532,7 +731,7 @@ async function getRangeCounts(ranges, { clusterKey }) {
       if (!key) throw ApiError.badRequest('Every range needs a key');
       const { start, end } = parseBounds(entry.from, entry.to);
       counts[key] = await OptimizationActivity.countDocuments(
-        baseFilter({ clusterKey, start, end })
+        tasksOnly(baseFilter({ clusterKey, start, end }))
       );
     })
   );
@@ -558,19 +757,12 @@ async function getClusterCounts({ start, end }) {
     { $match: baseFilter({ start, end }) },
     {
       $group: {
-        _id: { cluster: '$cluster', activityType: '$activityType' },
+        _id: { cluster: '$cluster', activityType: '$activityType', linked: IS_LINKED_INDEX },
         count: { $sum: 1 },
       },
     },
   ]);
 
-  // A per-cluster tally under the same metric names the summary card totals
-  // use, so a caller reads "longQueries" the same way wherever it came from.
-  const blankTotals = () => {
-    const out = { all: 0 };
-    for (const type of ACTIVITY_TYPES) out[METRIC_KEYS[type]] = 0;
-    return out;
-  };
 
   // Every defined cluster gets an entry — configured or not, with activity or
   // not — so a caller can render the full roster without its own copy of it.
@@ -584,9 +776,10 @@ async function getClusterCounts({ start, end }) {
 
   for (const row of rows) {
     const key = row._id.cluster || '';
-    const metric = METRIC_KEYS[row._id.activityType];
+    // Chip counts are tasks, like the `all` card: a linked index is not one.
+    const taskCount = row._id.linked ? 0 : row.count;
 
-    counts.all += row.count;
+    counts.all += taskCount;
 
     // Entries belonging to no cluster — written in single-database mode, or
     // before the field existed — are a real bucket rather than a gap, so the
@@ -603,10 +796,8 @@ async function getClusterCounts({ start, end }) {
       counts[bucket] = 0;
     }
 
-    counts[bucket] += row.count;
-    const entry = byCluster.get(bucket);
-    entry.totals.all += row.count;
-    if (metric) entry.totals[metric] += row.count;
+    counts[bucket] += taskCount;
+    addToTotals(byCluster.get(bucket).totals, row._id.activityType, row._id.linked, row.count);
   }
 
   return { counts, byCluster: [...byCluster.values()], roster };
@@ -625,6 +816,7 @@ module.exports = {
   toRow,
   getSummary,
   getActivities,
+  getIndexCandidates,
   getRangeCounts,
   getClusterCounts,
 };
