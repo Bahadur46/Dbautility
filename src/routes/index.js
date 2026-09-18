@@ -5,6 +5,7 @@ const authRoutes = require('./authRoutes');
 const manualIndexRoutes = require('./manualIndexRoutes');
 const auditLogRoutes = require('./auditLogRoutes');
 const queryExecutorRoutes = require('./queryExecutorRoutes');
+const monitorRoutes = require('./monitorRoutes');
 const dashboardRoutes = require('./dashboardRoutes');
 const { getDbMode, getDbError } = require('../config/db');
 const clusters = require('../config/clusters');
@@ -56,6 +57,10 @@ const dataRoute = [requireDatabase, requireAuth, requireCluster];
 router.use('/manual-indexes', ...dataRoute, manualIndexRoutes);
 router.use('/audit-logs', ...dataRoute, auditLogRoutes);
 router.use('/query-executor', ...dataRoute, queryExecutorRoutes);
+// Live server statistics for the cluster in session. Read-only, and pinned to
+// that cluster like the audit trail rather than reaching across them like the
+// dashboard: this reports on one server, so it answers for the one chosen.
+router.use('/monitor', ...dataRoute, monitorRoutes);
 // The dashboard opens on every cluster at once and narrows on ?cluster=, so
 // unlike the audit trail it deliberately reaches past the cluster the session
 // is pinned to. That is safe only because sign-in is not cluster-wise — one
