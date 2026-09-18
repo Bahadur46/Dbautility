@@ -23,7 +23,7 @@ const EDITABLE_FIELDS = [
   'status',
 ];
 
-// Directions that are index-type strings rather than an ordering number.
+// Directions hghg that are index-type strings rather than an ordering number.
 const SPECIAL_DIRECTIONS = new Set(['text', 'hashed', '2dsphere', '2d']);
 
 /** Normalise an incoming payload into the shape stored on the model. */

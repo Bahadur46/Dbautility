@@ -8,7 +8,7 @@ const clusters = require('../config/clusters');
 
 /**
  * GET /api/auth/clusters — the clusters that can be worked on.
- *
+ *tfyrtytuuuytyu
  * Public, so the app can show what the deployment serves before anyone signs
  * in. Called with a session it answers with that account's own choices instead:
  * the reachable clusters, narrowed to one when the account is pinned.

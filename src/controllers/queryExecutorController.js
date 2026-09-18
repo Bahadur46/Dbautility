@@ -10,11 +10,12 @@ const { sendSuccess } = require('../utils/apiResponse');
  *
  * Run one pasted mongo shell index command against the cluster in session.
  *
- * Administrator only: this removes
- * an index the application never created, and something else may still depend
- * on it. There is no "unused" evidence behind the request —
- * the operator is asserting it, so the account making the assertion has to be
- * one that carries the responsibility.
+ * Administrator only: this creates or removes an index outside the register —
+ * a drop may take one something else still depends on, and a create writes to
+ * a production collection without a definition behind it. There is no "unused"
+ * or "this query needs it" evidence behind either request — the operator is
+ * asserting it, so the account making the assertion has to be one that carries
+ * the responsibility.
  */
 const runCommand = asyncHandler(async (req, res) => {
   if (!req.user.isAdmin) {
@@ -44,13 +45,16 @@ const runCommand = asyncHandler(async (req, res) => {
  */
 const previewCommand = asyncHandler(async (req, res) => {
   const parsed = queryExecutor.parseCommand(req.body?.command);
+  const changes = queryExecutor.WRITES.includes(parsed.operation);
+
+  const messages = {
+    createIndex: 'This command creates an index. It will be recorded as a CREATE audit entry.',
+    dropIndex: 'This command removes an index. It will be recorded as a DROP audit entry.',
+  };
 
   return sendSuccess(res, {
-    message:
-      parsed.operation === 'dropIndex'
-        ? 'This command removes an index. It will be recorded as a DROP audit entry.'
-        : 'This command only reads. Nothing will be changed or recorded.',
-    data: { ...parsed, changes: parsed.operation === 'dropIndex' },
+    message: messages[parsed.operation] || 'This command only reads. Nothing will be changed or recorded.',
+    data: { ...parsed, changes },
   });
 });
 
