@@ -66,7 +66,7 @@ function withDatabase(uri, dbName) {
     url.pathname = `/${dbName}`;
     return url.toString();
   } catch {
-    // Not parseable as a URL — rewrite the path segment between the host and
+    // gggggNot parseable as a URL — rewrite the path segment between the host and
     // the query string instead.
     return uri.replace(/^(mongodb(?:\+srv)?:\/\/[^/?]+)(?:\/[^?]*)?/, `$1/${dbName}`);
   }
